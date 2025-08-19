@@ -29,3 +29,7 @@ checkpoints/
 # Editors
 .vscode/
 .idea/
+
+
+# Folders
+DATA/
