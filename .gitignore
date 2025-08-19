@@ -1,0 +1,31 @@
+# Python / notebooks
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual envs / conda
+.venv/
+venv/
+.env/
+*.env
+conda-env/
+*.conda
+*.lock
+
+# Build / cache
+build/
+dist/
+*.egg-info/
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# Data & outputs (keep your large or generated files out of git)
+data/
+outputs/
+logs/
+checkpoints/
+
+# Editors
+.vscode/
+.idea/
