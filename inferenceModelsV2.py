@@ -44,6 +44,7 @@ torch.manual_seed(0)
 
 
 
+
 def preprocess_data(failure_path: str,
                  event_count_path: str,
                  weather_path: str,
@@ -54,7 +55,8 @@ def preprocess_data(failure_path: str,
                  randomize: bool = True,
                  state_one_hot=True,
                  model_per_state=False,
-                 dropNA=True
+                 dropNA=True,
+                 feature_na_drop_threshold: float = 0.1
                  )->tuple[pd.DataFrame, list[str], list[str]]:
     """
     Pre-process the data:
@@ -70,6 +72,7 @@ def preprocess_data(failure_path: str,
         - state_one_hot (bool): If True, applies one-hot encoding to the 'State' column.
         - model_per_state (bool): If True, trains a separate model for each state.
         - dropNA (bool): If True, drops rows with NaN values after merging.
+        - feature_na_drop_threshold (float): Threshold for dropping features with NaN values. If the fraction of NaN values in a feature is greater than this threshold, the feature is dropped.
     OUTPUTS:
         - merged_count_df (pd.DataFrame): Merged dataframe containing event counts, weather data, and power load data.
         - feature_names (List[str]): List of feature names used in the merged dataframe.
@@ -84,12 +87,27 @@ def preprocess_data(failure_path: str,
     event_count_df['Frequency'] = event_count_df['NumFailingUnits'] / event_count_df['NumAvailUnits']
 
     # Weather data
-    weather_df = pd.read_csv(weather_path, index_col=[0,1], parse_dates=[0], usecols=['Date', 'State', 'PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND'])
+    weather_df = pd.read_csv(weather_path, index_col=['Date', 'State'], parse_dates=['Date'])#, usecols=['Date', 'State', 'PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND'])
+    weather_df = weather_df[list(set(feature_names)-{'Date', 'State'} & set(weather_df.columns))].copy()
+    # Drop columns with more than 80% NaN values and print a message
+    na_frac = weather_df.isna().mean()
+    drop_cols = na_frac[na_frac > feature_na_drop_threshold].index.tolist()
+    if drop_cols:
+        print(f"Dropping weather columns with >{feature_na_drop_threshold*100}% NaN: {drop_cols}")
+        weather_df = weather_df.drop(columns=drop_cols)
+        feature_names = [f for f in feature_names if f not in drop_cols]
 
     # Power load data
-    power_load_df = pd.read_csv(power_load_path, index_col=[0,1], parse_dates=[0])
+    power_load_df = pd.read_csv(power_load_path, index_col=['Date', 'State'], parse_dates=['Date'])
+    power_load_df = power_load_df[list(set(feature_names) & set(power_load_df.columns))].copy()
 
-    
+    na_frac = power_load_df.isna().mean()
+    drop_cols = na_frac[na_frac > feature_na_drop_threshold].index.tolist()
+    if drop_cols:
+        print(f"Dropping power load columns with >{feature_na_drop_threshold*100}% NaN: {drop_cols}")
+        power_load_df = power_load_df.drop(columns=drop_cols)
+        feature_names = [f for f in feature_names if f not in drop_cols]
+
     def mergeData(dataFrames:list[pd.DataFrame], date=True, state=True, dropna=True, how='inner'):
         """
         Merges a list of dataframes into a single dataframe.
@@ -124,6 +142,7 @@ def preprocess_data(failure_path: str,
             merged_df.dropna(inplace=True)
 
         return merged_df
+
     
     merged_count_df = mergeData([event_count_df, weather_df, power_load_df])
 
@@ -152,8 +171,10 @@ def preprocess_data(failure_path: str,
     merged_count_df['Date'] = merged_count_df.index.get_level_values('Date')
     failure_merged_df['Date'] = failure_merged_df.index.get_level_values('Date')
     # Ensure 'Date' is datetime
-    merged_count_df['Date'] = pd.to_datetime(merged_count_df['Date'])
+    # merged_count_df['Date'] = pd.to_datetime(merged_count_df['Date'])
+    merged_count_df['Date'] = pd.to_datetime(merged_count_df['Date'], errors='raise')
     failure_merged_df['Date'] = pd.to_datetime(failure_merged_df['Date'])
+
     if 'Season' in feature_names:
         def get_season(date):
             Y = date.year
