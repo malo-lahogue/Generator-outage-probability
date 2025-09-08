@@ -35,6 +35,8 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from scipy.spatial import cKDTree
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
 
+import itertools, math
+from datetime import datetime as _dt
 
 # Set seed for reproducibility
 np.random.seed(0)
@@ -56,7 +58,7 @@ def preprocess_data(failure_path: str,
                  state_one_hot=True,
                  model_per_state=False,
                  dropNA=True,
-                 feature_na_drop_threshold: float = 0.1
+                 feature_na_drop_threshold: float = 0.2
                  )->tuple[pd.DataFrame, list[str], list[str]]:
     """
     Pre-process the data:
@@ -1963,3 +1965,241 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         plt.tight_layout()
         plt.show()
 
+
+
+
+# Grid search utilities
+
+
+def _expand_grid(param_grid: dict):
+    """
+    Turn a dict of lists into a list of dicts (Cartesian product).
+    Example: {"a":[1,2], "b":[10]} -> [{"a":1,"b":10}, {"a":2,"b":10}]
+    """
+    keys = list(param_grid.keys())
+    vals = [param_grid[k] if isinstance(param_grid[k], (list, tuple)) else [param_grid[k]] for k in keys]
+    for combo in itertools.product(*vals):
+        yield dict(zip(keys, combo))
+
+def _val_loss_numpy(model, metric: str = "mse"):
+    """
+    Compute validation loss for any model that has:
+      - model.val_data  (DataFrame or torch Dataset)
+      - model.feature_cols, model.target_cols
+      - model.predict(X_df) -> np.ndarray
+    Falls back to numpy metrics; matches training losses:
+      'mse', 'mae', 'logloss' (BCE over probabilities in [0,1]).
+    """
+    metric = metric.lower()
+
+    # Build a DataFrame view for val set (works for MLP and XGB paths)
+    if hasattr(model, "val_data"):
+        if isinstance(model.val_data, pd.DataFrame):
+            val_df = model.val_data
+        else:
+            # Torch Subset/Dataset path (MLP). Reconstruct a DataFrame.
+            # We'll reuse the model’s helpers by emulating predict with DataLoader,
+            # but simpler: pull from original split in prepare_data when MLP path used.
+            # For MLP we already rely on model.val_loss, so return min of it.
+            if hasattr(model, "val_loss") and len(model.val_loss) > 0:
+                return float(np.min(model.val_loss))
+            raise ValueError("val_data is not a DataFrame and val_loss is empty; cannot score.")
+    else:
+        raise ValueError("Model has no val_data. Did you call prepare_data()?")
+
+    X_cols = list(np.unique(np.array(model.feature_cols).flatten()))
+    y_cols = list(np.unique(np.array(model.target_cols).flatten()))
+
+    X_val = val_df[X_cols].copy()
+    y_true = val_df[y_cols].to_numpy(dtype=np.float64)
+    y_pred = model.predict(X_val).reshape(y_true.shape).astype(np.float64)
+
+    if metric == "mse":
+        return float(np.mean((y_true - y_pred) ** 2))
+    if metric == "mae":
+        return float(np.mean(np.abs(y_true - y_pred)))
+    if metric == "logloss":  # BCE
+        eps = 1e-7
+        p = np.clip(y_pred, eps, 1.0 - eps)
+        # Ensure shapes align
+        if y_true.ndim == 1:
+            y_true = y_true.reshape(-1, 1)
+        if p.ndim == 1:
+            p = p.reshape(-1, 1)
+        bce = -(y_true * np.log(p) + (1.0 - y_true) * np.log(1.0 - p))
+        return float(np.mean(bce))
+
+    raise ValueError("metric must be 'mse', 'mae', or 'logloss'")
+
+def _already_done_df(csv_path: str):
+    if os.path.exists(csv_path):
+        try:
+            return pd.read_csv(csv_path)
+        except Exception:
+            pass
+    return pd.DataFrame(columns=[
+        "level","model_name","build_params","train_params",
+        "median_min_val_loss","timestamp"
+    ])
+
+def _row_key(level_name, model_name, build_params, train_params):
+    # Create a deterministic key for resume-ability
+    return (
+        str(level_name),
+        str(model_name),
+        json.dumps(build_params, sort_keys=True),
+        json.dumps(train_params,  sort_keys=True),
+    )
+
+def successive_halving_search(
+    model_specs: list,
+    # Each item in model_specs:
+    # {
+    #   "name": "MLP" or "XGB-something",
+    #   "constructor": callable -> returns a fresh model instance (e.g., im.MLP, im.xgboostModel),
+    #   "build_grid": dict of lists for build_model kwargs (architecture/hyperparams),
+    #   "train_grid": dict of lists for train_model kwargs (optimizer, loss_fn, epochs, ...),
+    #   "common_build": dict (fixed build_model kwargs, e.g., feature_cols, target_cols),
+    #   "common_train": dict (fixed train_model kwargs, e.g., weights_data=True, device="cpu")
+    # }
+    data: pd.DataFrame,
+    standardize: list | bool,
+    result_csv: str,
+    train_ratio: float = 0.8,
+    val_ratio: float   = 0.2,
+    val_metric_per_model: dict | None = None,  # e.g., {"xgb": "logloss", "mlp": "logloss"}
+    levels: list[dict] | None = None,
+    top_keep_ratio: float = 0.33,
+    resume: bool = True
+    ):
+    """
+    Generic successive-halving for your MLP & XGBoost wrappers.
+
+    - model_specs: list of model search specifications (see structure above)
+    - levels: [{"name":..., "epochs":..., "data_cap": int|None}, ...]
+    - Writes/reads a CSV log at result_csv.
+    """
+    if levels is None:
+        N = len(data)
+        levels = [
+            {"name":"L1-fast",   "epochs": 150, "data_cap": int(N*0.4)},
+            {"name":"L2-medium", "epochs": 500, "data_cap": int(N*0.8)},
+            {"name":"L3-full",   "epochs": 2000,"data_cap": None},
+        ]
+
+    # Build all candidate tuples (model_index, build_params, train_params)
+    all_candidates = []
+    for i, spec in enumerate(model_specs):
+        for build_params in _expand_grid(spec.get("build_grid", {})):
+            for train_params in _expand_grid(spec.get("train_grid", {})):
+                all_candidates.append((i, build_params, train_params))
+    print(f"Number of candidates : {len(all_candidates)}")
+    # Resume logic
+    done_df = _already_done_df(result_csv)
+    done_keys = set()
+    if resume and len(done_df):
+        for _, r in done_df.iterrows():
+            done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
+
+    survivors = all_candidates[:]
+
+    for li, level in enumerate(levels):
+        scored = []
+        for (mi, build_params, train_params) in survivors:
+            spec = model_specs[mi]
+            mname = spec["name"]
+            level_epochs = level["epochs"]
+            data_cap = level["data_cap"]
+            sub_data = data.iloc[:data_cap].copy() if data_cap is not None else data.copy()
+
+            # Merge fixed params
+            build_kw = dict(spec.get("common_build", {}))
+            build_kw.update(build_params)
+
+            train_kw = dict(spec.get("common_train", {}))
+            train_kw.update(train_params)
+            # cap epochs at this level
+            if "epochs" in train_kw:
+                train_kw["epochs"] = min(int(train_kw["epochs"]), int(level_epochs))
+
+            # Resume skip?
+            key = _row_key(level["name"], mname, build_kw, train_kw)
+            if resume and key in done_keys:
+                print(f"Skipping already-done: level={level['name']} model={mname} build={build_kw} train={train_kw}")
+                # Pull previous score
+                prev = done_df.loc[
+                    (done_df["level"] == level["name"]) &
+                    (done_df["model_name"] == mname) &
+                    (done_df["build_params"] == key[2]) &
+                    (done_df["train_params"] == key[3])
+                ]
+                score = float(prev["median_min_val_loss"].iloc[0])
+                scored.append((mi, build_params, train_params, score))
+                continue
+
+            # ----- Build, prepare, train, score -----
+            model = spec["constructor"]()
+            # 1) build
+            model.build_model(**build_kw)
+            # 2) prepare data
+            model.prepare_data(
+                data=sub_data,
+                train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=0.0,
+                standardize=standardize
+            )
+            # 3) reset + train
+            if hasattr(model, "reset_model"):
+                model.reset_model()
+            model.val_loss = []
+
+            # train with only the kwargs accepted by each class API
+            # (this works because both classes ignore extra kwargs they don't take)
+            model.train_model(**train_kw)
+
+            # 4) score
+            # - For MLP: use min(val_loss) directly (fast)
+            # - For XGB: compute validation loss with chosen metric
+            metric = None
+            if val_metric_per_model:
+                # allow key by exact name, lowercase name, or class name
+                metric = (
+                    val_metric_per_model.get(mname) or
+                    val_metric_per_model.get(mname.lower()) or
+                    val_metric_per_model.get(model.__class__.__name__) or
+                    val_metric_per_model.get(model.__class__.__name__.lower())
+                )
+
+            if hasattr(model, "val_loss") and len(model.val_loss) > 0:
+                score = float(np.min(model.val_loss))
+            else:
+                score = _val_loss_numpy(model, metric or "mse")
+
+            scored.append((mi, build_params, train_params, score))
+
+            # 5) append row to CSV
+            row = {
+                "level": level["name"],
+                "model_name": mname,
+                "build_params": json.dumps(build_kw, sort_keys=True),
+                "train_params": json.dumps(train_kw, sort_keys=True),
+                "median_min_val_loss": score,
+                "timestamp": _dt.now().isoformat()
+            }
+            # create dir once
+            if result_csv is not None:
+                os.makedirs(os.path.dirname(result_csv), exist_ok=True)
+                # write header if file does not exist
+                write_header = not os.path.exists(result_csv)
+                with open(result_csv, "a") as f:
+                    if write_header:
+                        f.write(",".join(row.keys()) + "\n")
+                    f.write(",".join(map(str, row.values())) + "\n")
+
+        # select survivors
+        scored.sort(key=lambda t: t[3])
+        keep = max(1, int(math.ceil(len(scored) * top_keep_ratio)))
+        survivors = [(mi, bp, tp) for (mi, bp, tp, _) in scored[:keep]]
+
+        # final output
+        if li == len(levels) - 1:
+            return scored[:keep]

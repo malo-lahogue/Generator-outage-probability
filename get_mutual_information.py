@@ -15,15 +15,22 @@ from pathlib import Path
 
 
 
-features_names=['PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND', 
-                'PAVG', 'PMIN', 'PMAX', 'PDMAX',
-                'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
+weather_data_file = 'DATA/weather_state_day_enhanced.csv'
+power_load_file = 'DATA/power_load_input.csv'
+weather_data = pd.read_csv(weather_data_file, index_col=[0,1], parse_dates=[0])
+power_load_data = pd.read_csv(power_load_file, index_col=[0,1], parse_dates=[0])
+
+
+# features_names=['PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND', 
+#                 'PAVG', 'PMIN', 'PMAX', 'PDMAX',
+#                 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
+features_names = list(weather_data.columns) + list(power_load_data.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
 
 
 merged_count_df, feature_names, target_columns = im.preprocess_data(failure_path='DATA/filtered_events.csv',
                                                                 event_count_path='DATA/event_count.csv',
-                                                                weather_path='DATA/weather_state_day.csv',
-                                                                power_load_path='DATA/power_load_input.csv',
+                                                                weather_path=weather_data_file,
+                                                                power_load_path=power_load_file,
                                                                 feature_names=features_names,
                                                                 target='Unit_Failure',  # 'Frequency' or 'Unit_Failure'
                                                                 state_one_hot=False,

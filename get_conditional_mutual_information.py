@@ -6,28 +6,34 @@ from sklearn.metrics import mutual_info_score
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 from npeet import entropy_estimators as ee
 
+from sklearn.preprocessing import StandardScaler
+
 import inferenceModelsV2 as im
 import multiprocessing as mp
 
-import time
+import time, os
 
 
+weather_data_file = 'DATA/weather_state_day_enhanced.csv'
+power_load_file = 'DATA/power_load_input.csv'
+weather_data = pd.read_csv(weather_data_file, index_col=[0,1], parse_dates=[0])
+power_load_data = pd.read_csv(power_load_file, index_col=[0,1], parse_dates=[0])
 
 
-
-features_names=['PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND', 
-                'PAVG', 'PMIN', 'PMAX', 'PDMAX',
-                'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
-
+# features_names=['PRCP', 'SNOW', 'SNWD', 'TAVG', 'TMIN', 'TMAX', 'ASTP', 'AWND', 
+#                 'PAVG', 'PMIN', 'PMAX', 'PDMAX',
+#                 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
+features_names = list(weather_data.columns) + list(power_load_data.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
 
 merged_count_df, feature_names, target_columns = im.preprocess_data(failure_path='DATA/filtered_events.csv',
                                                                 event_count_path='DATA/event_count.csv',
-                                                                weather_path='DATA/weather_state_day.csv',
-                                                                power_load_path='DATA/power_load_input.csv',
+                                                                weather_path=weather_data_file,
+                                                                power_load_path=power_load_file,
                                                                 feature_names=features_names,
                                                                 target='Unit_Failure',  # 'Frequency' or 'Unit_Failure'
                                                                 state_one_hot=False,
-                                                                cause_code_n_clusters=1)
+                                                                cause_code_n_clusters=1,
+                                                                feature_na_drop_threshold=0.2)                                                                
 
 discrete_features = ['C_0', 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']+[f for f in feature_names if f.startswith('State')]
 merged_count_df[discrete_features] = merged_count_df[discrete_features].astype('int')
@@ -172,14 +178,27 @@ def cmi_hybrid_mixed_XY(
 
 
 
+def get_mutual_information(df: pd.DataFrame,
+                          feature_name: str,
+                          target_col: str,
+                          feature_is_discrete: bool,
+                          k: int = 3) -> pd.DataFrame:
+    """
+    Compute mutual information between the target and the feature.
+    """
+    if feature_is_discrete:
+        mi = ee.midd(
+            df[feature_name].astype(int).to_numpy(),
+            df[target_col].astype(int).to_numpy()
+        )
+    else:
+        mi = ee.micd(
+            _as_cont2d(df[feature_name]),
+            _as_cont2d(df[target_col]),
+            k=k
+        )
 
-
-
-
-
-
-
-
+    return mi
 
 
 
@@ -188,7 +207,7 @@ discrete_set = set(discrete_features)
 
 # Optionally subsample for speed on huge n (keeps the same subset each iteration)
 # Comment out if you want to use all rows.
-MAX_N = 10_000
+MAX_N =7_000_000
 if len(merged_count_df) > MAX_N:
     # stratify on C_0 if it’s highly imbalanced; here we do a simple head sample for clarity
     data_short = merged_count_df.sample(n=MAX_N, random_state=42)
@@ -196,6 +215,12 @@ else:
     data_short = merged_count_df
 
 # data_short = merged_count_df
+
+# Z standardization
+# scaler = StandardScaler()
+max_vals, min_vals = data_short[stand_cols].max(), data_short[stand_cols].min()
+data_short.loc[:,stand_cols] = (data_short[stand_cols] - min_vals) / (max_vals - min_vals)
+
 
 ts = time.time()
 ##############################################
@@ -207,23 +232,41 @@ ts = time.time()
 ##############################################
     
 kept_features = []
-features_cmi = {}
+features_cmi = {'rank': [], 'feature': [], 'cmi': []}
+k_val = 3
 # kept_features = ['TMIN']
 # features_cmi = {'rank': [1], 'feature': ['TMIN'], 'cmi': [0.4255530836480954]}
 
+folder_name = f"Results/conditional_mutual_information_k={k_val}_standardized_{str(MAX_N//1000)+'K' if MAX_N<1e6 else str(MAX_N//1e6)+'M'}"
+if not os.path.exists(folder_name):
+    os.makedirs(folder_name)
+
+
 def process_one_feature(params):
     data_short, f, kept, discrete_set = params
-    val = cmi_hybrid_mixed_XY(
-                df=data_short,
-                X_col="C_0",               # <-- your binary target is X
-                Y_col=f,                   # <-- candidate feature
-                Z_cols=kept,               # <-- already selected (can be empty)
-                discrete_features=discrete_set,
-                k=5
-            )
-    return (f, val)
+    if kept:
+        val = cmi_hybrid_mixed_XY(
+                    df=data_short,
+                    X_col="C_0",               # <-- your binary target is X
+                    Y_col=f,                   # <-- candidate feature
+                    Z_cols=kept,               # <-- already selected (can be empty)
+                    discrete_features=discrete_set,
+                    k=k_val
+                )
+        return (f, val)
+    else:
+        # no features selected yet, so we compute MI instead of CMI
+        feature_is_discrete = f in discrete_set
+        val = get_mutual_information(
+            df=data_short,
+            feature_name=f,
+            target_col="C_0",
+            feature_is_discrete=feature_is_discrete,
+            k=k_val
+        )
+        return (f, val)
 
-for r in range(len(feature_names)):  #range(4):#
+for i,r in enumerate(np.arange(len(feature_names))):  #range(4):#
     scores = {}
     candidates = list(set(feature_names) - set(kept_features))
 
@@ -241,12 +284,15 @@ for r in range(len(feature_names)):  #range(4):#
     features_cmi['cmi'].append(scores[best_f])
     te = time.time()
 
-    print(f"Rank {i+1}: {best_f} with {'MI' if Z is None else 'CMI'} {scores[best_f]:.6f}")
+    print(f"Rank {i+1}: {best_f} with {'MI' if len(kept_features) == 1 else 'CMI'} {scores[best_f]:.6f}")
     print(f"Time taken for rank {i+1}: {te - ts:.2f} seconds")
     ts = te
     df_cmi = pd.DataFrame(features_cmi)
-
-    df_cmi.to_csv('Results/conditional_mutual_information_ranking.csv', index=False)
+    df_scores = pd.DataFrame.from_dict(scores, orient='index', columns=['cmi'])
+    df_scores.index.name = 'feature'
+    df_scores = df_scores.sort_values(by='cmi', ascending=False)
+    df_scores.to_csv(f"{folder_name}/conditional_mutual_information_scores_rank_{i+1}.csv")
+    df_cmi.to_csv(f"{folder_name}/conditional_mutual_information_ranking.csv", index=False)
 
 
 # te = time.time()
