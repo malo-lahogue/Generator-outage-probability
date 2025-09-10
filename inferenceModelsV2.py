@@ -56,6 +56,7 @@ def preprocess_data(failure_path: str,
                  cause_code_n_clusters: int = 1,
                  randomize: bool = True,
                  state_one_hot=True,
+                 cyclic_features=[],
                  model_per_state=False,
                  dropNA=True,
                  feature_na_drop_threshold: float = 0.2
@@ -272,7 +273,17 @@ def preprocess_data(failure_path: str,
     # 2. Format data
     if dropNA:
         merged_count_df.dropna(inplace=True)  # Drop rows with NaN values
-       
+
+    # Cyclic features:
+    for feat in cyclic_features:
+        if feat in feature_names:
+            min_val, max_val = merged_count_df[feat].min(), merged_count_df[feat].max()
+        merged_count_df[f'{feat}_sin'] = np.sin(2 * np.pi * (merged_count_df[feat] - min_val) / (max_val - min_val))
+        merged_count_df[f'{feat}_cos'] = np.cos(2 * np.pi * (merged_count_df[feat] - min_val) / (max_val - min_val))
+        feature_names.remove(feat)
+        feature_names += [f'{feat}_sin', f'{feat}_cos']
+        merged_count_df.drop(columns=[feat], inplace=True)
+
     # 3. get the right target
     if target == 'Unit_Failure':
         # We will expand to one row per available unit per (Date, State),
@@ -326,7 +337,6 @@ def preprocess_data(failure_path: str,
     # 4. Drop unnecessary columns
     merged_count_df = merged_count_df[feature_names + target_columns + ['Data_weight']].copy()
 
-    print(merged_count_df)
     return merged_count_df.astype(np.float64), feature_names, target_columns
 
 
@@ -2096,7 +2106,12 @@ def successive_halving_search(
                 all_candidates.append((i, build_params, train_params))
     print(f"Number of candidates : {len(all_candidates)}")
     # Resume logic
-    done_df = _already_done_df(result_csv)
+    # done_df = _already_done_df(result_csv)
+    done_df = pd.read_csv(result_csv) #if os.path.exists(result_csv) else pd.DataFrame(columns=[
+    #     "level","model_name","build_params","train_params",
+    #     "median_min_val_loss","timestamp"
+    # ])
+    print(done_df)
     done_keys = set()
     if resume and len(done_df):
         for _, r in done_df.iterrows():
