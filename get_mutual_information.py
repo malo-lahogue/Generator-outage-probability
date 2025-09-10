@@ -3,7 +3,7 @@ import numpy as np
 
 # Mutual information
 from sklearn.metrics import mutual_info_score
-from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
+# from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 from npeet import entropy_estimators as ee
 
 import inferenceModelsV2 as im
@@ -12,10 +12,14 @@ import time
 
 from typing import Iterable
 from pathlib import Path
+import sys
+
+
+k_knn = int(sys.argv[1])
 
 
 
-weather_data_file = 'DATA/weather_state_day_enhanced.csv'
+weather_data_file = 'DATA/weather_data_per_state_all.csv'
 power_load_file = 'DATA/power_load_input.csv'
 weather_data = pd.read_csv(weather_data_file, index_col=[0,1], parse_dates=[0])
 power_load_data = pd.read_csv(power_load_file, index_col=[0,1], parse_dates=[0])
@@ -25,6 +29,7 @@ power_load_data = pd.read_csv(power_load_file, index_col=[0,1], parse_dates=[0])
 #                 'PAVG', 'PMIN', 'PMAX', 'PDMAX',
 #                 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
 features_names = list(weather_data.columns) + list(power_load_data.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
+features_names = list(set(features_names)-set(['EventStartDT', 'Date']))
 
 
 merged_count_df, feature_names, target_columns = im.preprocess_data(failure_path='DATA/filtered_events.csv',
@@ -63,7 +68,7 @@ def compute_mutual_information_auto(
     use_rows: pd.Index | None = None,
     out_csv: str = "Results/mutual_information_ranking.csv",
     standardize_continuous: bool = False,
-) -> pd.DataFrame:
+    ) -> pd.DataFrame:
     """
     Auto-choose NPEET estimator:
       - disc X, disc Y        -> ee.midd(x1d, y1d)
@@ -136,15 +141,17 @@ ts = time.time()
 n = len(merged_count_df)
 train_end = 10000#int(0.8 * n)
 train_idx = merged_count_df.index[:]
+# k_knn = 3  # match sklearn's default
+out_csv_file = f"Results/mutual_information_ranking_k{k_knn}.csv"
 
 mi_df = compute_mutual_information_auto(
     df=merged_count_df,
     feature_names=feature_names,
     target_col="C_0",                     # or your other target
     discrete_features=discrete_features,  # your explicit list (best source of truth)
-    k=50,                                  # match sklearn's n_neighbors for fairer comparison
+    k=k_knn,                                  # match sklearn's n_neighbors for fairer comparison
     use_rows=train_idx,
-    out_csv="Results/mutual_information_ranking.csv",
+    out_csv=out_csv_file,
     standardize_continuous=False,         # set True if scales vary a lot
 )
 

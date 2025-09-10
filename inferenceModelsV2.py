@@ -84,7 +84,7 @@ def preprocess_data(failure_path: str,
     # failure data
     failure_df = pd.read_csv(failure_path)
 
-    event_count_df = pd.read_csv(event_count_path, index_col=[0,1], parse_dates=[0])
+    event_count_df = pd.read_csv(event_count_path, index_col=['EventStartDT', 'State'], parse_dates=[0])
     event_count_df = event_count_df[event_count_df['NumAvailUnits'] > 0].copy()
     event_count_df['Frequency'] = event_count_df['NumFailingUnits'] / event_count_df['NumAvailUnits']
 
@@ -326,6 +326,7 @@ def preprocess_data(failure_path: str,
     # 4. Drop unnecessary columns
     merged_count_df = merged_count_df[feature_names + target_columns + ['Data_weight']].copy()
 
+    print(merged_count_df)
     return merged_count_df.astype(np.float64), feature_names, target_columns
 
 
@@ -2100,6 +2101,8 @@ def successive_halving_search(
     if resume and len(done_df):
         for _, r in done_df.iterrows():
             done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
+    
+    print(done_keys)
 
     survivors = all_candidates[:]
 
@@ -2124,6 +2127,8 @@ def successive_halving_search(
 
             # Resume skip?
             key = _row_key(level["name"], mname, build_kw, train_kw)
+            print(key)
+            print("Is key in done keys?", key in done_keys)
             if resume and key in done_keys:
                 print(f"Skipping already-done: level={level['name']} model={mname} build={build_kw} train={train_kw}")
                 # Pull previous score
@@ -2136,6 +2141,8 @@ def successive_halving_search(
                 score = float(prev["median_min_val_loss"].iloc[0])
                 scored.append((mi, build_params, train_params, score))
                 continue
+
+            continue
 
             # ----- Build, prepare, train, score -----
             model = spec["constructor"]()

@@ -78,13 +78,13 @@ def main():
     }
     mlp_build_grid = {
         "hidden_sizes": [
-            # (128, 128, 64),
+            (128, 128, 64),
         #    (256, 128, 64),
-           (256, 256, 128, 64),
+        #    (256, 256, 128, 64),
         ],
         "activations": [
-            # ("relu","relu","relu"),
-           ("relu","relu","relu","relu"),
+            ("relu","relu","relu"),
+        #    ("relu","relu","relu","relu"),
         ],
     }
     mlp_train_grid = {
