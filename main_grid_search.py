@@ -8,7 +8,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Successive-halving grid search for MLP & XGBoost.")
     p.add_argument("--failures",      type=str, default="DATA/filtered_events.csv")
     p.add_argument("--events",        type=str, default="DATA/event_count.csv")
-    p.add_argument("--weather",       type=str, default="DATA/weather_state_day_enhanced.csv")
+    p.add_argument("--weather",       type=str, default="DATA/weather_data_per_state_all.csv")
     p.add_argument("--powerload",     type=str, default="DATA/power_load_input.csv")
     p.add_argument("--target",        type=str, default="Unit_Failure", choices=["Unit_Failure","Frequency"])
     p.add_argument("--clusters",      type=int, default=1)
@@ -27,6 +27,7 @@ def main():
     power   = pd.read_csv(args.powerload, index_col=[0,1], parse_dates=[0])
     feature_names = list(weather.columns) + list(power.columns) + \
                     ['Season','Month','DayOfWeek','DayOfYear','Holiday','Weekend']
+    feature_names = list(set(feature_names)-set(['EventStartDT', 'Date', 'PRCP_30dz']))
 
     # ---------- Merge + label prep ----------
     merged_df, feature_cols, target_cols = im.preprocess_data(
@@ -37,12 +38,19 @@ def main():
         feature_names=feature_names,
         target=args.target,
         state_one_hot=True,
+        cyclic_features=['Season', 'Month', 'DayOfWeek', 'DayOfYear'],
         cause_code_n_clusters=args.clusters,
-        feature_na_drop_threshold=0.2
+        feature_na_drop_threshold=0.10
     )
+    # merged_df, feature_cols, target_cols = [],[],[]
+    # stand_cols = []
+    
+
 
     # Standardize all non-binary + non-state one-hot
-    stand_cols = [f for f in feature_cols if not f.startswith("State_") and f not in ["Holiday","Weekend"]]
+    stand_cols = [f for f in feature_cols if not f.startswith("State_") and f not in ["Holiday","Weekend", 'Season','Month','DayOfWeek','DayOfYear']]
+    print(f"Standardized features: {stand_cols}")
+    
 
     # ---------- Define model specs ----------
     # 1) XGBoost
@@ -91,31 +99,31 @@ def main():
         "optimizer": ["adam"],
         "loss_fn":   ["logloss"] if args.target == "Unit_Failure" else ["mse"],
         "regularization_type": ["L2"],
-        "lambda_reg": [1e-4, 1e-3],
+        "lambda_reg": [1e-4],#, 1e-4, 1e-3],
         "epochs": [1000],            # upper bound — levels will cap
-        "batch_size": [128, 256],
+        "batch_size": [256],#,128 256],
         "lr": [1e-3, 2e-4],
         "device": ["cuda"],           # set to 'cuda' if available else 'cpu
         "weights_data": [True],
     }
 
     model_specs = [
-        # {
-        #     "name": "xgboostModel",
-        #     "constructor": lambda: im.xgboostModel(verbose=False),
-        #     "common_build": xgb_common_build,
-        #     "build_grid":   xgb_build_grid,
-        #     "common_train": {},
-        #     "train_grid":   xgb_train_grid,
-        # },
         {
-            "name": "MLP",
-            "constructor": lambda: im.MLP(verbose=False),
-            "common_build": mlp_common_build,
-            "build_grid":   mlp_build_grid,
+            "name": "xgboostModel",
+            "constructor": lambda: im.xgboostModel(verbose=False),
+            "common_build": xgb_common_build,
+            "build_grid":   xgb_build_grid,
             "common_train": {},
-            "train_grid":   mlp_train_grid,
-        }
+            "train_grid":   xgb_train_grid,
+        },
+        # {
+        #     "name": "MLP",
+        #     "constructor": lambda: im.MLP(verbose=False),
+        #     "common_build": mlp_common_build,
+        #     "build_grid":   mlp_build_grid,
+        #     "common_train": {},
+        #     "train_grid":   mlp_train_grid,
+        # }
     ]
 
     # Validation metric per model

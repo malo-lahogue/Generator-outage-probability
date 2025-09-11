@@ -29,7 +29,7 @@ power_load_data = pd.read_csv(power_load_file, index_col=[0,1], parse_dates=[0])
 #                 'PAVG', 'PMIN', 'PMAX', 'PDMAX',
 #                 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
 features_names = list(weather_data.columns) + list(power_load_data.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']
-features_names = list(set(features_names)-set(['EventStartDT', 'Date']))
+features_names = list(set(features_names)-set(['EventStartDT', 'Date', 'PRCP_30dz']))
 
 
 merged_count_df, feature_names, target_columns = im.preprocess_data(failure_path='DATA/filtered_events.csv',
@@ -39,13 +39,14 @@ merged_count_df, feature_names, target_columns = im.preprocess_data(failure_path
                                                                 feature_names=features_names,
                                                                 target='Unit_Failure',  # 'Frequency' or 'Unit_Failure'
                                                                 state_one_hot=False,
-                                                                cause_code_n_clusters=1)
+                                                                cause_code_n_clusters=1,
+                                                                feature_na_drop_threshold=0.10)
 
 discrete_features = ['C_0', 'Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']+[f for f in feature_names if f.startswith('State')]
 merged_count_df[discrete_features] = merged_count_df[discrete_features].astype('int')
 
 stand_cols = [f for f in feature_names if not f.startswith('State_') and not f in ['Holiday', 'Weekend']]
-
+merged_count_df[stand_cols] = (merged_count_df[stand_cols] - merged_count_df[stand_cols].mean()) / merged_count_df[stand_cols].std(ddof=0)#.replace(0, 1.0)
 
 
 def _is_discrete_series(s: pd.Series, discrete_features: set[str]) -> bool:

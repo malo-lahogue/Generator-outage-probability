@@ -2058,8 +2058,8 @@ def _row_key(level_name, model_name, build_params, train_params):
     return (
         str(level_name),
         str(model_name),
-        json.dumps(build_params, sort_keys=True),
-        json.dumps(train_params,  sort_keys=True),
+        json.dumps(build_params, sort_keys=True).replace(",", ";"),
+        json.dumps(train_params,  sort_keys=True).replace(",", ";"),
     )
 
 def successive_halving_search(
@@ -2106,8 +2106,8 @@ def successive_halving_search(
                 all_candidates.append((i, build_params, train_params))
     print(f"Number of candidates : {len(all_candidates)}")
     # Resume logic
-    # done_df = _already_done_df(result_csv)
-    done_df = pd.read_csv(result_csv) #if os.path.exists(result_csv) else pd.DataFrame(columns=[
+    done_df = _already_done_df(result_csv)
+    # done_df = pd.read_csv(result_csv) #if os.path.exists(result_csv) else pd.DataFrame(columns=[
     #     "level","model_name","build_params","train_params",
     #     "median_min_val_loss","timestamp"
     # ])
@@ -2202,8 +2202,8 @@ def successive_halving_search(
             row = {
                 "level": level["name"],
                 "model_name": mname,
-                "build_params": json.dumps(build_kw, sort_keys=True),
-                "train_params": json.dumps(train_kw, sort_keys=True),
+                "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
+                "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
                 "median_min_val_loss": score,
                 "timestamp": _dt.now().isoformat()
             }
