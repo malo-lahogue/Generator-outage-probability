@@ -10,7 +10,7 @@ def parse_args():
     p.add_argument("--events",        type=str, default="DATA/event_count.csv")
     p.add_argument("--weather",       type=str, default="DATA/weather_data_per_state_all.csv")
     p.add_argument("--powerload",     type=str, default="DATA/power_load_input.csv")
-    p.add_argument("--target",        type=str, default="Unit_Failure", choices=["Unit_Failure","Frequency"])
+    p.add_argument("--target",        type=str, default="Frequency", choices=["Unit_Failure","Frequency"])
     p.add_argument("--clusters",      type=int, default=1)
     p.add_argument("--result_csv",    type=str, default="Results/grid_search_log.csv")
     p.add_argument("--top_keep",      type=float, default=0.33)
@@ -28,6 +28,9 @@ def main():
     feature_names = list(weather.columns) + list(power.columns) + \
                     ['Season','Month','DayOfWeek','DayOfYear','Holiday','Weekend']
     feature_names = list(set(feature_names)-set(['EventStartDT', 'Date', 'PRCP_30dz']))
+
+    feature_names.sort()
+    print(f"Initial features ({len(feature_names)}): {feature_names}")
 
     # ---------- Merge + label prep ----------
     merged_df, feature_cols, target_cols = im.preprocess_data(
@@ -57,8 +60,8 @@ def main():
     xgb_common_build = {
         "feature_cols": feature_cols,
         "target_cols":  target_cols,
-        "eval_metric":  "logloss" if args.target == "Unit_Failure" else "rmse",
-        "objective":    "reg:logistic" if args.target == "Unit_Failure" else "reg:squarederror",
+        "eval_metric":  "logloss",# if args.target == "Unit_Failure" else "rmse",
+        "objective":    "reg:logistic",# if args.target == "Unit_Failure" else "reg:squarederror",
         "early_stopping_rounds": 10,
         "subsample": 1.0,
         "num_boost_round": 500,
@@ -67,8 +70,8 @@ def main():
     xgb_build_grid = {
         "max_depth":   [4, 6, 8],
         "eta":         [0.02, 0.05, 0.1],
-        "gamma":       [0.0, 1.0],
-        "lambda_reg":  [0.0, 1.0],
+        "gamma":       [0.0, 0.25, 0.5, 0.75, 1.0],
+        "lambda_reg":  [0.0, 0.25, 0.5, 0.75, 1.0],
         # num_boost_round can also be searched if you want:
         # "num_boost_round": [300, 500, 800],
         # "subsample": [0.7, 1.0],
@@ -82,54 +85,56 @@ def main():
     mlp_common_build = {
         "feature_cols": feature_cols,
         "target_cols":  target_cols,
-        "out_act_fn":   "sigmoid" if args.target == "Unit_Failure" else None,
+        "out_act_fn":   "sigmoid",# if args.target == "Unit_Failure" else None,
     }
     mlp_build_grid = {
         "hidden_sizes": [
-            (128, 128, 64),
+            # (128, 128, 64),
         #    (256, 128, 64),
         #    (256, 256, 128, 64),
+           (256, 256, 128, 64),
         ],
         "activations": [
-            ("relu","relu","relu"),
+            # ("relu","relu","relu"),
         #    ("relu","relu","relu","relu"),
+           ("relu","relu","relu","relu","relu"),
         ],
     }
     mlp_train_grid = {
         "optimizer": ["adam"],
-        "loss_fn":   ["logloss"] if args.target == "Unit_Failure" else ["mse"],
+        "loss_fn":   ["logloss"],# if args.target == "Unit_Failure" else ["mse"],
         "regularization_type": ["L2"],
-        "lambda_reg": [1e-4],#, 1e-4, 1e-3],
+        "lambda_reg": [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
         "epochs": [1000],            # upper bound — levels will cap
-        "batch_size": [256],#,128 256],
-        "lr": [1e-3, 2e-4],
+        "batch_size": [128, 256],
+        "lr": [1e-4, 2e-4, 4e-4, 1e-3],
         "device": ["cuda"],           # set to 'cuda' if available else 'cpu
         "weights_data": [True],
     }
 
     model_specs = [
-        {
-            "name": "xgboostModel",
-            "constructor": lambda: im.xgboostModel(verbose=False),
-            "common_build": xgb_common_build,
-            "build_grid":   xgb_build_grid,
-            "common_train": {},
-            "train_grid":   xgb_train_grid,
-        },
         # {
-        #     "name": "MLP",
-        #     "constructor": lambda: im.MLP(verbose=False),
-        #     "common_build": mlp_common_build,
-        #     "build_grid":   mlp_build_grid,
+        #     "name": "xgboostModel",
+        #     "constructor": lambda: im.xgboostModel(verbose=False),
+        #     "common_build": xgb_common_build,
+        #     "build_grid":   xgb_build_grid,
         #     "common_train": {},
-        #     "train_grid":   mlp_train_grid,
-        # }
+        #     "train_grid":   xgb_train_grid,
+        # },
+        {
+            "name": "MLP",
+            "constructor": lambda: im.MLP(verbose=False),
+            "common_build": mlp_common_build,
+            "build_grid":   mlp_build_grid,
+            "common_train": {},
+            "train_grid":   mlp_train_grid,
+        }
     ]
 
     # Validation metric per model
     val_metric = {
-        "xgboostModel": "logloss" if args.target == "Unit_Failure" else "mse",
-        "MLP":          "logloss" if args.target == "Unit_Failure" else "mse"
+        "xgboostModel": "logloss",# if args.target == "Unit_Failure" else "mse",
+        "MLP":          "logloss" #if args.target == "Unit_Failure" else "mse"
     }
 
     winners = im.successive_halving_search(
@@ -142,19 +147,29 @@ def main():
         val_metric_per_model=val_metric,
         levels=[
             {"name":"L1-fast",   "epochs": 150,  "data_cap": int(len(merged_df)*0.4)},
-            #{"name":"L2-medium", "epochs": 500,  "data_cap": int(len(merged_df)*0.8)},
-            #{"name":"L3-full",   "epochs": 2000, "data_cap": None},
+            {"name":"L2-medium", "epochs": 500,  "data_cap": int(len(merged_df)*0.8)},
+            {"name":"L3-full",   "epochs": 2000, "data_cap": None},
         ],
         top_keep_ratio=args.top_keep,
         resume=True#not args.no_resume
     )
 
-    print("\n=== Top survivors at final level ===")
-    for (mi, build_p, train_p, score) in winners:
-        print(f"[{model_specs[mi]['name']}] score={score:.6f}")
-        print(" build:", json.dumps(build_p, sort_keys=True))
-        print(" train:", json.dumps(train_p,  sort_keys=True))
-        print("-"*60)
+    # print("\n=== Top survivors at final level ===")
+    # for (mi, build_p, train_p, score) in winners:
+    #     print(f"[{model_specs[mi]['name']}] score={score:.6f}")
+    #     print(" build:", json.dumps(build_p, sort_keys=True))
+    #     print(" train:", json.dumps(train_p,  sort_keys=True))
+    #     print("-"*60)
+
+    print("\n=== Global winner ===")
+
+    best_model = min(winners, key=lambda x: x[3])
+    mi, build_p, train_p, score = best_model
+    print(f"[{model_specs[mi]['name']}] score={score:.6f}")
+    print(" build:", json.dumps(build_p, sort_keys=True))
+    print(" train:", json.dumps(train_p,  sort_keys=True))
+    print("-"*60)
+
 
 if __name__ == "__main__":
     main()

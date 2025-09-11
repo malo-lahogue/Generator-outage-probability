@@ -469,7 +469,7 @@ class GeneratorFailureProbabilityInference:
         test_size  = N - train_size - val_size
 
         self.test_data = data.iloc[-test_size:]
-        ds = data.iloc[:N - test_size] if test_size > 0 else self.data
+        ds = data.iloc[:N - test_size] if test_size > 0 else data# self.data
 
         if standardize == True:
             self.scaler_target = StandardScaler()
@@ -1674,7 +1674,6 @@ class xgboostModel(GeneratorFailureProbabilityInference):
 
 
 
-
         X_train = self.train_data[self.feature_cols]#.values
         y_train = self.train_data[self.target_cols]#.values
         X_val = self.val_data[self.feature_cols]#.values
@@ -2107,17 +2106,12 @@ def successive_halving_search(
     print(f"Number of candidates : {len(all_candidates)}")
     # Resume logic
     done_df = _already_done_df(result_csv)
-    # done_df = pd.read_csv(result_csv) #if os.path.exists(result_csv) else pd.DataFrame(columns=[
-    #     "level","model_name","build_params","train_params",
-    #     "median_min_val_loss","timestamp"
-    # ])
-    print(done_df)
+    
     done_keys = set()
     if resume and len(done_df):
         for _, r in done_df.iterrows():
             done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
     
-    print(done_keys)
 
     survivors = all_candidates[:]
 
@@ -2142,8 +2136,7 @@ def successive_halving_search(
 
             # Resume skip?
             key = _row_key(level["name"], mname, build_kw, train_kw)
-            print(key)
-            print("Is key in done keys?", key in done_keys)
+
             if resume and key in done_keys:
                 print(f"Skipping already-done: level={level['name']} model={mname} build={build_kw} train={train_kw}")
                 # Pull previous score
@@ -2157,7 +2150,6 @@ def successive_halving_search(
                 scored.append((mi, build_params, train_params, score))
                 continue
 
-            continue
 
             # ----- Build, prepare, train, score -----
             model = spec["constructor"]()
