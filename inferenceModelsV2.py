@@ -1001,7 +1001,7 @@ class MLP(GeneratorFailureProbabilityInference):
             print(f"Number of parameters: {self.num_param}")
 
     def train_model(self,
-                    optimizer: str = 'adam',  loss_fn: str = 'mse',
+                    optimizer: str = 'adam',  loss: str = 'mse',
                     regularization_type='L2', lambda_reg=1e-3,
                     weights_data : bool = False,
                     epochs: int = 200, batch_size: int = 200, lr: float = 1e-3,
@@ -1010,7 +1010,7 @@ class MLP(GeneratorFailureProbabilityInference):
         Train the model on the training dataset.
         INPUTS:
         - optimizer (str): The optimizer to use. Options: 'adam', 'sgd', 'rmsprop'.
-        - loss_fn (str): The loss function to use. Options: 'mse', 'mae', 'cross_entropy'.
+        - loss_fn (str): The loss function to use. Options: 'mse', 'mae', 'logloss', 'cross_entropy'.
         - regularization_type (str): Type of regularization to apply. Options: 'L1', 'L2', or None.
         - lambda_reg (float): Regularization strength.
         - weights_data (bool): If True, use weights for the loss function.
@@ -1028,7 +1028,7 @@ class MLP(GeneratorFailureProbabilityInference):
             raise ValueError(f"If lambda_reg is a list, it must have the same length as epochs. (currently input of length {len(lambda_reg)} with {epochs} epochs)")
         
         self.optimizer_name = optimizer
-        self.loss_fn_name = loss_fn
+        self.loss_fn_name = loss
         self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         
         self.model.to(device)
@@ -1324,7 +1324,7 @@ class MLP(GeneratorFailureProbabilityInference):
     def _gather_val_arrays(self, device=None, loss_name: str = "mse"):
         """
         Collect validation features/targets from self.val_data.
-        Returns X_val (N,D) and y_val with a shape appropriate for the given loss:
+        Returns X_val (N,D), y_val and weights ([N]) with a shape appropriate for the given loss:
           - mse/mae/logloss (BCE): y_val is (N,T) (T can be 1 or >1)
           - cross_entropy: y_val is (N,) integer class indices
                            If stored as one-hot (N,C), we convert to indices via argmax.
@@ -1333,17 +1333,19 @@ class MLP(GeneratorFailureProbabilityInference):
             raise ValueError("Validation data not found. Call prepare_data() first.")
 
         loader = torch.utils.data.DataLoader(self.val_data, batch_size=4096, shuffle=False)
-        Xs, Ys = [], []
+        Xs, Ys, Ws = [], [], []
         for batch in loader:
             if len(batch) == 3:
-                xb, yb, _ = batch
+                xb, yb, wb = batch
             else:
                 xb, yb = batch
             Xs.append(xb.detach().cpu())
             Ys.append(yb.detach().cpu())
+            Ws.append(wb.detach().cpu())
 
         X = torch.cat(Xs, dim=0)  # (N, D) or (N, T, D)
         Y = torch.cat(Ys, dim=0)  # (N, T_out) or (N, T, D_out) or (N,) etc.
+        W = torch.cat(Ws, dim=0)  # (N,)
 
         # Flatten inputs if they are sequences
         if X.ndim > 2:
@@ -1358,7 +1360,7 @@ class MLP(GeneratorFailureProbabilityInference):
             elif Y.ndim == 1:
                 Y = Y.view(-1, 1)
             # else keep (N, T_out)
-            return X.numpy(), Y.numpy()
+            return X.numpy(), Y.numpy(), W.numpy()
 
         elif loss_name == "cross_entropy":
             # Expect class indices (N,). If we have one-hot (N,C), convert.
@@ -1370,7 +1372,7 @@ class MLP(GeneratorFailureProbabilityInference):
             else:
                 # Unexpected shape -> flatten last dims to classes and argmax
                 Y_idx = Y.view(Y.size(0), -1).argmax(dim=1)
-            return X.numpy(), Y_idx.numpy().astype(np.int64)
+            return X.numpy(), Y_idx.numpy().astype(np.int64), W.numpy()
 
         else:
             raise ValueError("Unknown loss_name: use 'mse', 'mae', 'logloss', or 'cross_entropy'.")
@@ -1398,7 +1400,7 @@ class MLP(GeneratorFailureProbabilityInference):
         Y = torch.cat(preds, dim=0).numpy()
         return Y
 
-    def _loss_np(self, y_true, y_pred, loss='mse'):
+    def _loss_np(self, y_true, y_pred, weights=None, loss='mse'):
         """
         Numpy loss to mirror training choices.
         - mse/mae: mean across samples & outputs
@@ -1407,14 +1409,34 @@ class MLP(GeneratorFailureProbabilityInference):
         """
         loss = loss.lower()
 
+        def _reduce_elemwise_loss(loss_elem, w=None):
+            """
+            loss_elem shape:
+            - Regression (MSE/MAE): [B, D] or [B, T, D]
+            - BCE: same as regression
+            - CE: [B] (already per-sample)
+            Returns scalar loss (weighted or unweighted mean over batch).
+            """
+            if loss_elem.dim() == 1:
+                per_sample = loss_elem  # [B]
+            else:
+                # average across all target dimensions per sample
+                per_sample = loss_elem.view(loss_elem.size(0), -1).mean(dim=1)  # [B]
+
+            if w is None:
+                return per_sample.mean()
+            # weighted mean over batch; avoid div-by-zero
+            denom = w.sum().clamp_min(1e-12)
+            return (per_sample * w).sum() / denom
+
         if loss == 'mse':
-            return np.mean((y_true - y_pred) ** 2)
+            return _reduce_elemwise_loss((y_true - y_pred) ** 2, w=weights)
 
         if loss == 'mae':
-            return np.mean(np.abs(y_true - y_pred))
+            return _reduce_elemwise_loss(np.abs(y_true - y_pred), w=weights)
 
         if loss == 'logloss':  # BCE
-            eps = 1e-7
+            eps = 1e-10
             # Clip predicted probabilities
             p = np.clip(y_pred, eps, 1.0 - eps)
             # Ensure shapes are compatible
@@ -1423,7 +1445,7 @@ class MLP(GeneratorFailureProbabilityInference):
             if p.ndim == 1:
                 p = p.reshape(-1, 1)
             bce = -(y_true * np.log(p) + (1.0 - y_true) * np.log(1.0 - p))
-            return np.mean(bce)
+            return _reduce_elemwise_loss(bce, w=weights)
 
         if loss == 'cross_entropy':
             # y_true: (N,) int class indices
@@ -1437,7 +1459,7 @@ class MLP(GeneratorFailureProbabilityInference):
             n = y_true.shape[0]
             # pick the correct class log-prob
             ll = log_probs[np.arange(n), y_true]
-            return -np.mean(ll)
+            return -_reduce_elemwise_loss(ll, w=weights)
 
         raise ValueError("loss must be 'mse', 'mae', 'logloss', or 'cross_entropy'")
 
@@ -1846,7 +1868,6 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         torch.save(checkpoint, model_path)
         if self.verbose:
             print(f"Saved XGBoost checkpoint to: {model_path}")
-
 
     @classmethod
     def load_model(cls, model_path: str, verbose: bool = True):
