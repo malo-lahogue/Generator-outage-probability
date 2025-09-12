@@ -34,3 +34,4 @@ checkpoints/
 # Folders
 DATA/
 Results/
+run/logs
