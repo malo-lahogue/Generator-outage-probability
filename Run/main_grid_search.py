@@ -2,7 +2,11 @@
 import os, json, argparse
 import numpy as np
 import pandas as pd
-import inferenceModelsV2 as im    # your file
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
+import inferenceModels as im    # your file
+
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Successive-halving grid search for MLP & XGBoost.")
@@ -102,7 +106,7 @@ def main():
     }
     mlp_train_grid = {
         "optimizer": ["adam"],
-        "loss_fn":   ["logloss"],# if args.target == "Unit_Failure" else ["mse"],
+        "loss":   ["logloss"],# if args.target == "Unit_Failure" else ["mse"],
         "regularization_type": ["L2"],
         "lambda_reg": [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
         "epochs": [1000],            # upper bound — levels will cap

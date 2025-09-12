@@ -16,6 +16,6 @@ module load miniforge
 source $HOME/venvs/Load_shedding_surrogate_ENV/bin/activate
 
 
-# python get_mutual_information.py 3
-# python get_conditional_mutual_information.py
+# python mutual_information.py 3
+# python conditional_mutual_information.py
 python main_grid_search.py
