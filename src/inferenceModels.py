@@ -1,8 +1,15 @@
 # Import libraries
 
 # Data processing and manipulation
+from __future__ import annotations
+
+from typing import List, Tuple, Sequence, Optional
 import numpy as np
 import pandas as pd
+
+
+
+
 from pandas.tseries.holiday import USFederalHolidayCalendar
 
 
@@ -43,20 +50,6 @@ from datetime import datetime as _dt
 
 
 
-from __future__ import annotations
-
-from typing import List, Tuple, Sequence, Optional
-import numpy as np
-import pandas as pd
-
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from collections import defaultdict
-
-
-
-
 
 # Set seed for reproducibility
 # np.random.seed(0)
@@ -85,27 +78,53 @@ def preprocess_data(
     seed: Optional[int] = 42,
     ) -> Tuple[pd.DataFrame, List[str], List[str]]:
     """
-    Pre-process the data:
-    INPUTS:
-        - failure_path (str): Path to the CSV file containing the failure counts and features for each day and each state.
-        - event_count_path (str): Path to the CSV file containing the event counts for each day and each state.
-        - weather_path (str): Path to the CSV file containing the weather data for each day
-        - power_load_path (str): Path to the CSV file containing the power load data for each day.
-        - features_names (List[str]): Feature names to use for failure prediction.
-        - target (str): Target variable for prediction. Either 'Frequency' (default) or 'Unit_Failure'.
-        - cause_code_n_clusters (int): Number of clusters to use for cause codes. Default is 1 (prediction of any cause code)
-        - randomize (bool): If True, shuffles the data before splitting into train and test sets.
-        - state_one_hot (bool): If True, applies one-hot encoding to the 'State' column.
-        - cyclic_features (List[str]): List of features that are cyclic (e.g., 'Month', 'DayOfWeek'). These features will be transformed using sine and cosine transformations.
-        - model_per_state (bool): If True, trains a separate model for each state.
-        - dropNA (bool): If True, drops rows with NaN values after merging.
-        - feature_na_drop_threshold (float): Threshold for dropping features with NaN values. If the fraction of NaN values in a feature is greater than this threshold, the feature is dropped.
-        - seed (Optional[int]): Random seed for reproducibility. If None, no seed is set.
-    OUTPUTS:
-        - merged_count_df (pd.DataFrame): Merged dataframe containing event counts, weather data, and power load data.
-        - feature_names (List[str]): List of feature names used in the merged dataframe.
-        - target_columns (List[str]): List of target columns for the model, which are the cause code clusters.
+        Pre-process and align multiple daily, state-indexed datasets (failures, event counts,
+        weather, and power-load), enrich them with calendar/cyclic signals, optionally cluster
+        cause codes, and construct model-ready features/targets.
+
+        The function:
+        1) Loads the four CSVs and normalizes their indices to a common MultiIndex (Date, State).
+        2) Selects only requested features that actually exist; drops columns with too many NaNs.
+        3) Merges weather and power-load features into the event-count table (inner join on Date/State).
+        4) Adds calendar features (Season/Month/DayOfWeek/DayOfYear/Holiday/Weekend) if requested.
+        5) Encodes the 'State' either as one-hot columns (State_*) or as a single numeric category.
+        6) Optionally encodes any listed cyclic features into sine/cosine pairs (e.g., Month → Month_sin/cos).
+        7) Builds targets:
+        - If cause_code_n_clusters == 1: a single target C_0 (failures or frequency).
+        - If >1: clusters cause codes via k-means over feature means, then counts failures per cluster
+            and produces targets C_0..C_{K-1} (raw counts or frequencies).
+        In all cases, also computes a global Frequency = NumFailingUnits / NumAvailUnits (clipped to [0, 1]).
+        8) Formats the supervised task:
+        - target == 'Frequency': returns one row per (Date, State) with targets as rates;
+            sets Data_weight = NumAvailUnits (useful for weighted losses).
+        - target == 'Unit_Failure': expands to one row per available unit with one-hot targets for
+            failing clusters; sets Data_weight = 1.
+        9) Optionally shuffles rows deterministically.
+        10) Returns a float64 DataFrame containing only [features + targets + Data_weight], plus the
+            final feature and target name lists.
+
+        INPUTS:
+            - failure_path (str) : Path to the CSV with unit-level failures, including at least ['EventStartDT','State','CauseCode','UnitID'].
+            - event_count_path (str) : Path to the CSV with daily state-level counts, indexed by ['EventStartDT','State'] and including ['NumAvailUnits','NumFailingUnits'].
+            - weather_data_path (str) : Path to the CSV with weather features indexed by ['Date','State']; columns may include the names in feature_names.
+            - power_data_path (str) : Path to the CSV with power-load features indexed by ['Date','State']; columns may include the names in feature_names.
+            - feature_names (List[str]) : Candidate feature columns to include from weather/power-load (plus optional calendar/cyclic features). Nonexistent names are ignored; dropped if NaN fraction > threshold.
+            - target (str) : Target mode: 'Frequency' (default, per-(Date,State) rates) or 'Unit_Failure' (per-unit expansion with one-hot cluster labels).
+            - cause_code_n_clusters (int) : If 1, aggregate “any cause” as a single target C_0. If >1, cluster CauseCode into this many groups and produce C_0..C_{K-1}.
+            - randomize (bool) : If True, shuffles the final rows (deterministic if seed is provided).
+            - state_one_hot (bool) : If True and not model_per_state, one-hot encodes the State as State_* columns; otherwise keeps a single numeric/categorical 'State' column.
+            - cyclic_features (List[str]) : Feature names to encode as sine/cosine pairs (e.g., ['Month','DayOfWeek']). Skips quietly if a name is absent; handles degenerate ranges.
+            - model_per_state (bool) : If True, keeps a single 'State' column for external per-state training (no one-hot).
+            - dropNA (bool) : If True, drops rows with missing values after merge and feature engineering.
+            - feature_na_drop_threshold (float) : Drop any feature column whose NaN fraction exceeds this threshold (e.g., 0.2 → drop if >20% NaN).
+            - seed (Optional[int]) : Random seed for deterministic shuffling and clustering initialization; if None, randomness is unconstrained.
+
+        OUTPUTS:
+            - merged_count_df (pd.DataFrame) : Final model table with columns [<features> + <target_columns> + 'Data_weight']; float64 by default. For 'Unit_Failure', rows are per unit; otherwise per (Date, State).
+            - feature_names (List[str]) : Final ordered list of feature columns present in merged_count_df (after one-hot/cyclic expansion and drops).
+            - target_columns (List[str]) : Names of target columns, e.g., ['C_0'] or ['C_0', ..., f'C_{K-1}'] when cause_code_n_clusters == K.
     """
+
 
     rng = np.random.default_rng(seed if seed is not None else None)
 
