@@ -3033,6 +3033,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             subsample=subsample,
             eval_metric=eval_metric,
             objective=objective,
+            early_stopping_rounds=early_stopping_rounds,
             verbosity=1 if self.verbose else 0,
             device=device,
         )
@@ -3088,8 +3089,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             y_train,
             sample_weight=weights,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=self.early_stopping_rounds,
-            verbose=self.verbose,
+            # early_stopping_rounds=self.early_stopping_rounds,
         )
 
     def reset_model(self) -> None:
@@ -3393,7 +3393,6 @@ class xgboostModel0(GeneratorFailureProbabilityInference0):
                                       subsample=subsample,
                                       eval_metric=eval_metric,
                                       objective=objective,
-                                      early_stopping_rounds=early_stopping_rounds,
                                       verbosity=1 if self.verbose else 0,
                                       device=device)
         

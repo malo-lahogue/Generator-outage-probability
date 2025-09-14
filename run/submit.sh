@@ -1,7 +1,7 @@
 #!/bin/bash 
-#SBATCH -p mit_preemptable
+####SBATCH -p mit_preemptable
 #####SBATCH -p mit_normal
-####SBATCH -p mit_normal_gpu
+#SBATCH -p mit_normal_gpu
 #####SBATCH -p mit_quicktest
 #SBATCH -c 10
 #SBATCH --gpus-per-node=1
@@ -18,4 +18,5 @@ source $HOME/venvs/Load_shedding_surrogate_ENV/bin/activate
 
 # python mutual_information.py 3
 # python conditional_mutual_information.py
-python main_grid_search.py
+# python main_grid_search.py --models xgb
+python main_train_model.py --models xgb
