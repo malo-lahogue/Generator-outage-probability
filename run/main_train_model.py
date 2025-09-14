@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from time import time
 
 import numpy as np
 import pandas as pd
@@ -79,7 +80,9 @@ def load_feature_bases(weather_path: Path, powerload_path: Path) -> list[str]:
 
 
 def main() -> None:
-    """ Main function to run the grid search. """
+    """ Main function to train the ML model. """
+    t_start = time()
+
     args = parse_args()         # Arguments
     np.random.seed(args.seed)   # Reproducibility
 
@@ -111,7 +114,7 @@ def main() -> None:
     
 
     if "xgb" in args.models:
-        xgb_model = im.xgboostModel(verbose=True)
+        xgb_model = im.xgboostModel(verbose=False)
         xgb_model.build_model(max_depth=8,
                             eta=0.02,
                             gamma=1,
@@ -121,7 +124,9 @@ def main() -> None:
                             target_cols=target_cols,
                             eval_metric='logloss', # rmse, logloss, mae, mape
                             objective='reg:logistic',
-                            subsample=1)
+                            subsample=1,
+                            device=args.device,
+                            early_stopping_rounds=10)
 
         xgb_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
 
@@ -133,7 +138,31 @@ def main() -> None:
 
 
     elif "mlp" in args.models:
-        pass
+        mlp_model = im.MLP(verbose=False)
+        mlp_model.build_model(feature_cols=feature_cols,
+                            target_cols=target_cols,
+                            hidden_sizes=(100, 50),
+                            activations=('relu', 'relu'),
+                            out_act_fn='sigmoid')
+        mlp_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
+        mlp_model.train_model(optimizer='adam',
+                              loss = 'logloss',
+                              regularization_type = 'L2',
+                              lambda_reg=4e-4,
+                              weights_data=True,
+                              epochs=500,
+                              batch_size=256,
+                              lr=1e-3,
+                              device=args.device)
+
+        path_to_save = THIS_DIR / "../Results/Models" / "MLP_model.pth"
+        mlp_model.save_model(path_to_save)
+
+    t_end = time()
+    print(f"Training completed in {t_end - t_start:.1f} seconds.")
+
+
+
 
 if __name__ == "__main__":
     main()
