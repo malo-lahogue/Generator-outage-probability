@@ -18,5 +18,5 @@ source $HOME/venvs/Load_shedding_surrogate_ENV/bin/activate
 
 # python mutual_information.py 3
 # python conditional_mutual_information.py
-# python main_grid_search.py --models xgb
-python main_train_model.py --models xgb
+python main_grid_search.py --models mlp
+# python main_train_model.py --models mlp --device cpu

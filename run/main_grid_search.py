@@ -134,11 +134,17 @@ def main() -> None:
                         "num_boost_round" : 500,
                         "device"          : args.device,     
                         }
+    # xgb_build_grid = {
+    #                     "max_depth":   [4, 6, 8],
+    #                     "eta":         [0.02, 0.05, 0.1],
+    #                     "gamma":       [0.0, 0.25, 0.5, 0.75, 1.0],
+    #                     "reg_lambda":  [0.0, 0.25, 0.5, 0.75, 1.0]
+    #                     }
     xgb_build_grid = {
-                        "max_depth":   [4, 6, 8],
-                        "eta":         [0.02, 0.05, 0.1],
-                        "gamma":       [0.0, 0.25, 0.5, 0.75, 1.0],
-                        "reg_lambda":  [0.0, 0.25, 0.5, 0.75, 1.0]
+                        "max_depth":   [4],
+                        "eta":         [0.02],
+                        "gamma":       [0.0, 0.25],
+                        "reg_lambda":  [0.0, 0.25]
                         }
     xgb_common_train = {
                         "weights_data": True,
@@ -154,15 +160,15 @@ def main() -> None:
     mlp_build_grid = {
         "hidden_sizes": [
                         (128, 128, 64),
-                        (256, 128, 64),
-                        (256, 256, 128, 64),
-                        (256, 256, 128, 64),
+                        # (256, 128, 64),
+                        # (256, 256, 128, 64),
+                        # (256, 256, 256, 128, 64),
                         ],
         "activations": [
                         ("relu",) * 3,
-                        ("relu",) * 3,
-                        ("relu",) * 4,
-                        ("relu",) * 5,
+                        # ("relu",) * 3,
+                        # ("relu",) * 4,
+                        # ("relu",) * 5,
                         ],
     }
     mlp_common_train =  {
@@ -173,11 +179,17 @@ def main() -> None:
                         "device": args.device,
                         # "seed": args.seed,
                         }
+    # mlp_train_grid = {
+    #                 "lambda_reg"          : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
+    #                 "epochs"              : [2000],   # upper bound — levels will cap
+    #                 "batch_size"          : [128, 256],
+    #                 "lr"                  : [1e-4, 2e-4, 4e-4, 1e-3],
+    #                 }
     mlp_train_grid = {
-                    "lambda_reg"          : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
+                    "lambda_reg"          : [5e-5],
                     "epochs"              : [2000],   # upper bound — levels will cap
-                    "batch_size"          : [128, 256],
-                    "lr"                  : [1e-4, 2e-4, 4e-4, 1e-3],
+                    "batch_size"          : [128],
+                    "lr"                  : [1e-4, 2e-4],
                     }
 
     # Choose models from CLI
