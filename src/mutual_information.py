@@ -6,7 +6,8 @@ from sklearn.metrics import mutual_info_score
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 from npeet import entropy_estimators as ee
 
-import inferenceModelsV2 as im
+import inferenceModels as im
+import multiprocessing as mp
 
 import time
 
@@ -113,18 +114,19 @@ def compute_mutual_information_sklearn(
     
     discrete_vars = [False if f not in discrete_features else True for f in feature_names]
 
-    X_train= merged_count_df.loc[:int(0.8*len(merged_count_df)), feature_names].to_numpy()
-    y_train= merged_count_df.loc[:int(0.8*len(merged_count_df)), target_columns].to_numpy().ravel()
+    X_train= df.loc[:int(0.8*len(df)), feature_names].to_numpy()
+    y_train= df.loc[:int(0.8*len(df)), target_col].to_numpy().ravel()
 
     discrete_vars = [False if f not in discrete_features else True for f in feature_names]
-    data_short = merged_count_df.copy()
+    data_short = df.copy()
     X_train = data_short[feature_names].to_numpy()
-    y_train = data_short[target_columns].to_numpy().ravel()
+    y_train = data_short[target_col].to_numpy().ravel()
 
     mutual_information = mutual_info_classif(X_train, y_train, discrete_features=discrete_vars,
-                                         n_neighbors=3)
+                                         n_neighbors=3,
+                                         n_jobs=min(int(mp.cpu_count()/2)-2,len(feature_names)))
 
-    mi_df = (pd.DataFrame({"feature": list(mutual_information.index), "mi": list(mutual_information.values())})
+    mi_df = (pd.DataFrame({"feature": list(feature_names), "mi": list(mutual_information)})
              .sort_values("mi", ascending=False, ignore_index=True))
 
     Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
