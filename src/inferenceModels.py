@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # ── Standard Library ────────────────────────────────────────────────────────────
 import csv
-import datetime as _dt
+import datetime
 import importlib
 import itertools
 import json
@@ -10,15 +10,15 @@ import math
 import os
 import pickle
 import warnings
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 # Robust UTC for all Python versions (3.11+: _dt.UTC, older: _dt.timezone.utc)
 try:
-    UTC = _dt.UTC            # Python 3.11+
+    UTC = datetime.UTC            # Python 3.11+
 except AttributeError:
-    UTC = _dt.timezone.utc   # Older versions
+    UTC = datetime.timezone.utc   # Older versions
 
 # ── Third-Party ────────────────────────────────────────────────────────────────
 import numpy as np
@@ -1066,7 +1066,82 @@ class GeneratorFailureProbabilityInference:
         plt.show()
 
 
+class EarlyStopper:
+    """
+    Stop only when BOTH conditions hold:
+      • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
+      • Flat-window: variability in last `flat_patience` epochs <= flat_delta (abs or relative).
+    Guardrails:
+      • Optional max_bad_epochs (hard cap).
+    """
+    def __init__(self,
+                 min_delta: float = 0.0,
+                 patience: int = 15,
+                 burn_in: int = 10,
+                 # flat-window
+                 flat_delta: float | None = None,
+                 flat_patience: int | None = None,
+                 flat_mode: str = "iqr",          # "iqr" is robust
+                 rel_flat: float | None = 2e-3,   # e.g., 0.2% of |best|; None to disable
+                 # guardrail
+                 max_bad_epochs: int | None = None):
+        self.min_delta = float(min_delta)
+        self.patience = int(patience)
+        self.burn_in = int(burn_in)
+        self.flat_delta = flat_delta
+        self.flat_patience = int(flat_patience or patience)
+        self.flat_mode = flat_mode
+        self.rel_flat = rel_flat
+        self.max_bad_epochs = max_bad_epochs
 
+        self.best = np.inf
+        self.best_state = None
+        self.epoch = 0
+        self.epochs_since_best = 0
+        self.window = deque(maxlen=self.flat_patience)
+        self.stop_reason = None
+
+    def _flat_metric(self, arr):
+        if self.flat_mode == "iqr":
+            q75, q25 = np.percentile(arr, [75, 25])
+            return float(q75 - q25)
+        return float(np.max(arr) - np.min(arr))  # range
+
+    def step(self, val_loss: float, model=None):
+        self.epoch += 1
+        self.window.append(val_loss)
+
+        improved = val_loss < (self.best - self.min_delta)
+        if improved:
+            self.best = val_loss
+            self.epochs_since_best = 0
+            if model is not None:
+                self.best_state = {k: v.detach().cpu().clone()
+                                   for k, v in model.state_dict().items()}
+        else:
+            self.epochs_since_best += 1
+
+        if self.epoch < self.burn_in:
+            return False
+
+        if self.max_bad_epochs is not None and self.epochs_since_best >= self.max_bad_epochs:
+            self.stop_reason = f"max_bad_epochs {self.epochs_since_best} ≥ {self.max_bad_epochs}"
+            return True
+
+        if (self.epochs_since_best >= self.patience and
+            self.flat_delta is not None and
+            len(self.window) == self.window.maxlen):
+
+            thr = self.flat_delta
+            if self.rel_flat is not None:
+                thr = max(thr or 0.0, self.rel_flat * max(1e-12, abs(self.best)))
+
+            fluct = self._flat_metric(list(self.window))
+            if fluct <= thr:
+                self.stop_reason = (f"AND stop: no-improve {self.epochs_since_best} ≥ {self.patience} "
+                                    f"AND flat-window {self.flat_mode}={fluct:.3e} ≤ {thr:.3e}")
+                return True
+        return False
 
 
 class MLP(GeneratorFailureProbabilityInference):
@@ -1174,37 +1249,49 @@ class MLP(GeneratorFailureProbabilityInference):
             return nn.CrossEntropyLoss(reduction=reduction)  # expects logits + class indices
         raise ValueError(f"Unknown loss '{loss_name}'")
 
-    def train_model(
-        self,
-        optimizer: str = 'adam',
-        loss: str = 'mse',
-        regularization_type: Optional[str] = 'L2',
-        lambda_reg: Union[float, list[float]] = 1e-3,
-        weights_data: bool = False,
-        epochs: int = 200,
-        batch_size: int = 200,
-        lr: float = 1e-3,
-        device: str = 'cpu',
-        ) -> None:
+    def train_model(self,
+                optimizer: Literal['adam','sgd','rmsprop']='adam',
+                loss: Literal['mse','mae','logloss','cross_entropy']='mse',
+                regularization_type='L2', lambda_reg=1e-3,
+                epochs: int = 200, batch_size: int = 200, lr: float = 1e-3,
+                weights_data: bool = False,
+                device: str = 'cpu',
+                # smart early stopping
+                early_stopping: bool = True,
+                patience: int = 20, min_delta: float = 0.0,
+                flat_delta: float | None = None,
+                flat_patience: int | None = None,
+                flat_mode: str = "range",          # or "iqr"
+                rel_flat: float | None = 2e-3,
+                burn_in: int = 10,
+                # stability & scheduling
+                grad_clip_norm: Optional[float] = None,
+                lr_scheduler: Optional[Literal['plateau','cosine','onecycle']] = None,
+                scheduler_kwargs: Optional[dict] = None) -> None:
         """
-            Train the MLP.
+            Train the MLP with optional data weights, smart early stopping, grad clipping,
+            and LR scheduling.
 
             INPUTS:
-            - optimizer (str) : {'adam','sgd','rmsprop'}.
-            - loss (str) : {'mse','mae','logloss','cross_entropy'}.
-            - regularization_type (str | None) : 'L1', 'L2', or None.
-            - lambda_reg (float | list[float]) : Scalar or per-epoch strengths (len == epochs).
-            - weights_data (bool) : Use 'Data_weight' from Dataset in loss reduction.
-            - epochs (int) : Number of epochs.
-            - batch_size (int) : Batch size.
-            - lr (float) : Learning rate.
-            - device (str) : 'cpu' or 'cuda'.
+            - optimizer (str): {'adam','sgd','rmsprop'}.
+            - loss (str): {'mse','mae','logloss','cross_entropy'}.
+            - regularization_type (str|None): 'L1', 'L2', or None.
+            - lambda_reg (float|list[float]): Scalar or per-epoch strengths (len == epochs).
+            - weights_data (bool): Use 'Data_weight' from Dataset in loss reduction.
+            - epochs (int): Number of epochs.
+            - batch_size (int): Batch size.
+            - lr (float): Learning rate.
+            - device (str): 'cpu' or 'cuda'.
 
             OUTPUTS:
             - None
         """
-        if regularization_type is not None and not (isinstance(lambda_reg, (float, int)) and lambda_reg > 0 or isinstance(lambda_reg, list)):
-            raise ValueError("When using regularization, lambda_reg must be > 0 (float) or a non-empty list.")
+        # --- regularization schedule ---
+        if regularization_type is not None and not (
+            (isinstance(lambda_reg, (float, int)) and float(lambda_reg) > 0.0)
+            or (isinstance(lambda_reg, list) and len(lambda_reg) > 0)
+        ):
+            raise ValueError("With regularization, lambda_reg must be > 0 (float) or a non-empty list.")
 
         if isinstance(lambda_reg, (float, int)):
             lambda_reg_arr = np.full(epochs, float(lambda_reg), dtype=np.float32)
@@ -1213,21 +1300,44 @@ class MLP(GeneratorFailureProbabilityInference):
                 raise ValueError("lambda_reg list must have length equal to epochs.")
             lambda_reg_arr = np.asarray(lambda_reg, dtype=np.float32)
 
+        # --- basic setup ---
         if optimizer not in self.pytorch_optimizers:
             raise KeyError(f"Unknown optimizer '{optimizer}'.")
-
         self.optimizer_name = optimizer
         self.loss_fn_name = loss
         self.model.to(device)
+        self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
         train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
-        val_loader   = DataLoader(self.val_data, batch_size=batch_size, shuffle=False)
+        val_loader   = DataLoader(self.val_data,   batch_size=batch_size, shuffle=False)
 
         optim = self.pytorch_optimizers[optimizer](self.model.parameters(), lr=lr)
         loss_fn = self._make_loss(loss, weighted=weights_data)
 
+        # --- LR scheduler (optional) ---
+        scheduler = None
+        scheduler_kwargs = scheduler_kwargs or {}
+        if lr_scheduler == 'plateau':
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optim, mode='min',
+                factor=scheduler_kwargs.get('factor', 0.5),
+                patience=scheduler_kwargs.get('patience', 5),
+                cooldown=scheduler_kwargs.get('cooldown', 0),
+                min_lr=scheduler_kwargs.get('min_lr', 1e-6)
+            )
+        elif lr_scheduler == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optim, T_max=max(1, epochs)
+            )
+        elif lr_scheduler == 'onecycle':
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optim, max_lr=lr,
+                steps_per_epoch=max(1, len(train_loader)), epochs=epochs
+            )
+
+        # --- weighted reduction helper ---
         def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
-            # tensor: [B] or [B, ...]
+            # tensor: [B] or [B, ...] -> mean over feature dims to per-sample, then (weighted) mean over batch
             if tensor.ndim > 1:
                 per_sample = tensor.view(tensor.size(0), -1).mean(dim=1)
             else:
@@ -1237,13 +1347,10 @@ class MLP(GeneratorFailureProbabilityInference):
             denom = torch.clamp(w.sum(), min=1e-12)
             return (per_sample * w).sum() / denom
 
-        def step(loader: DataLoader, train: bool, epoch: int) -> float:
-            if train:
-                self.model.train()
-            else:
-                self.model.eval()
-
-            running, nobs = 0.0, 0
+        # --- one epoch over a loader ---
+        def step(loader, train: bool, epoch: int):
+            self.model.train() if train else self.model.eval()
+            total, n = 0.0, 0
             with torch.set_grad_enabled(train):
                 for batch in loader:
                     if len(batch) == 3:
@@ -1256,34 +1363,56 @@ class MLP(GeneratorFailureProbabilityInference):
                     xb = xb.to(device)
                     yb = yb.to(device)
                     yhat = self.model(xb)
-                    elem = loss_fn(yhat, yb)
+                    elem = loss_fn(yhat, yb)                # elementwise loss
                     loss_val = _reduce_elemwise_loss(elem, wb)
 
                     # regularization
                     if regularization_type == 'L1':
                         l1 = sum(p.abs().sum() for p in self.model.parameters())
-                        loss_val = loss_val + lambda_reg_arr[epoch - 1] * l1 / max(1, self.num_parameters)
+                        loss_val = loss_val + lambda_reg_arr[epoch-1] * l1 / self.num_parameters
                     elif regularization_type == 'L2':
                         l2 = sum(p.pow(2).sum() for p in self.model.parameters())
-                        loss_val = loss_val + lambda_reg_arr[epoch - 1] * l2 / max(1, self.num_parameters)
+                        loss_val = loss_val + lambda_reg_arr[epoch-1] * l2 / self.num_parameters
 
                     if train:
                         optim.zero_grad()
                         loss_val.backward()
+                        if grad_clip_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
                         optim.step()
 
                     bs = xb.size(0)
-                    running += loss_val.item() * bs
-                    nobs += bs
-            return running / max(1, nobs)
+                    total += loss_val.item() * bs
+                    n     += bs
+            return total / max(1, n)
 
-        self.val_loss.clear()
+        # --- early stopper ---
+        stopper = EarlyStopper(min_delta=min_delta, patience=patience, burn_in=burn_in,
+                            flat_delta=flat_delta, flat_patience=flat_patience,
+                            flat_mode=flat_mode, rel_flat=rel_flat)
+
+        # --- training loop ---
         for ep in range(1, epochs + 1):
             train_loss = step(train_loader, True, ep)
-            val_loss = step(val_loader, False, ep)
+            val_loss   = step(val_loader,   False, ep)
             self.val_loss.append(val_loss)
-            if self.verbose and (ep == 1 or ep % 10 == 0):
-                print(f"Epoch {ep:03d} | train={train_loss:.4e} | val={val_loss:.4e}")
+
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            elif scheduler is not None:
+                scheduler.step()
+
+            if self.verbose and (ep % 10 == 0 or ep == 1):
+                print(f"Epoch {ep:03d}: train={train_loss:.4e} | val={val_loss:.4e}")
+
+            if early_stopping and stopper.step(val_loss, model=self.model):
+                if self.verbose:
+                    print(f"[early stop] {stopper.stop_reason} at epoch {ep}")
+                break
+
+        # --- restore best weights ---
+        if early_stopping and stopper.best_state is not None:
+            self.model.load_state_dict(stopper.best_state)
 
     def reset_model(self) -> None:
         """
@@ -1368,7 +1497,7 @@ class MLP(GeneratorFailureProbabilityInference):
 
         checkpoint = {
             "format_version": 2,
-            "saved_at": datetime.now(UTC).isoformat(),
+            "saved_at": datetime.datetime.now(UTC).isoformat(),
             "libs": {
                 "torch": torch.__version__,
                 "numpy": np.__version__,
@@ -1970,7 +2099,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
 
         checkpoint = {
             "format_version": 1,
-            "saved_at": datetime.now(UTC).isoformat(),
+            "saved_at": datetime.datetime.now(UTC).isoformat(),
             "libs": {
                 "xgboost": xgb.__version__,
                 "numpy": np.__version__,
@@ -2474,7 +2603,7 @@ def successive_halving_search(
                     "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
                     "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
                     "min_val_loss": score,  # kept name for backward-compat
-                    "timestamp": _dt.datetime.now(UTC).isoformat()
+                    "timestamp": datetime.datetime.now(UTC).isoformat()
                 }
                 write_header = not os.path.exists(result_csv)
                 with open(result_csv, "a", newline="") as f:

@@ -177,6 +177,9 @@ def main() -> None:
                         "regularization_type": "L2",
                         "weights_data": True,
                         "device": args.device,
+                        "early_stopping": True,
+                        "grad_clip_norm": 1.0,
+                        "lr_scheduler": "plateau",
                         # "seed": args.seed,
                         }
     # mlp_train_grid = {
@@ -190,6 +193,13 @@ def main() -> None:
                     "epochs"              : [2000],   # upper bound — levels will cap
                     "batch_size"          : [128],
                     "lr"                  : [1e-4, 2e-4],
+                    "patience"            : [10],
+                    "min_delta"           : [1e-4],
+                    "flat_delta"          : [1e-3],
+                    "flat_patience"       : [20],
+                    "flat_mode"           : ['iqr'],
+                    "rel_flat"            : [2e-3],
+                    "burn_in"             : [10],
                     }
 
     # Choose models from CLI
@@ -227,7 +237,7 @@ def main() -> None:
     training_levels = [
         {"name": "L1-fast",   "epochs": 150,  "data_cap": int(n_rows * 0.40)},
         {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
-        {"name": "L3-full",   "epochs": 2000, "data_cap": None},
+        # {"name": "L3-full",   "epochs": 2000, "data_cap": None},
     ]
 
     # ---------- Run search ----------

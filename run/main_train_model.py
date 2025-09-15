@@ -153,7 +153,13 @@ def main() -> None:
                               epochs=500,
                               batch_size=256,
                               lr=1e-3,
-                              device=args.device)
+                              device=args.device,
+                              # smart stopping knobs
+                              early_stopping=True, patience=15, min_delta=1e-4,
+                              flat_delta=1e-3, flat_patience=20, flat_mode='iqr', rel_flat=2e-3, burn_in=10,
+                              # stability & LR policy
+                              grad_clip_norm=1.0,
+                              lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
 
         path_to_save = THIS_DIR / "../Results/Models" / "MLP_model.pth"
         mlp_model.save_model(path_to_save)
