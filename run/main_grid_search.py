@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_XGB_new.csv")
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB_new.csv")
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
@@ -133,7 +133,6 @@ def main() -> None:
                         "objective"    : "reg:logistic",
                         "early_stopping_rounds" : 10,
                         "subsample"       : 1.0,
-                        # "num_boost_round" : 500,
                         "device"          : args.device,     
                         }
     xgb_build_grid = {
@@ -142,7 +141,7 @@ def main() -> None:
                         "gamma":       [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],# [0.0, 0.25, 0.5, 0.75, 1.0],
                         "reg_lambda":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],#[0.0, 0.25, 0.5, 0.75, 1.0]
                         #
-                        "num_boost_round" : [100, 200],# [100, 200, 500, 800, 1200, 1500]
+                        "num_boost_round" : [100],# [100, 200, 500, 800, 1200, 1500] [100, 1200, 1500]
                         }
 
     xgb_common_train = {
@@ -158,7 +157,7 @@ def main() -> None:
     }
     mlp_build_grid = {
         "hidden_sizes": [
-                        # (128, 128, 64),#
+                        (128, 128, 64),#
                         # (256, 128, 64),#
                         # (256, 256, 128, 64),#
                         # (256, 256, 256, 128, 64),
@@ -166,10 +165,10 @@ def main() -> None:
                         # (1024, 256, 64),
                         # (2048, 512, 64),
                         # (2048, 512),
-                        (8192, 1024, 64),#
+                        # (8192, 1024, 64),#
                         ],
         "activations": [
-                        # ("relu",) * 3,
+                        ("relu",) * 3,
                         # ("relu",) * 3,
                         # ("relu",) * 4,
                         # ("relu",) * 5,
@@ -177,7 +176,7 @@ def main() -> None:
                         # ("relu",) * 3,
                         # ("relu",) * 3,
                         # ("relu",) * 2,
-                        ("relu",) * 3,
+                        # ("relu",) * 3,
                         ],
     }
     mlp_common_train =  {
@@ -260,6 +259,7 @@ def main() -> None:
         levels=training_levels,
         top_keep_ratio=args.top_keep,
         resume=args.reuse_results,
+        model_per_state=True
         # seed=args.seed,  # if supported by your helper
     )
 

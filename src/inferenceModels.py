@@ -2364,8 +2364,10 @@ def _val_loss_numpy(
     raise ValueError("Cannot compute validation loss: no suitable val_data or helpers found.")
 
 
-def _already_done_df(csv_path: str) -> pd.DataFrame:
+def _already_done_df(csv_path: str, model_per_state) -> pd.DataFrame:
     cols = ["level", "model_name", "build_params", "train_params", "min_val_loss", "timestamp"]
+    if model_per_state:
+        cols += ["state"]
     if os.path.exists(csv_path):
         try:
             df = pd.read_csv(csv_path)
@@ -2479,7 +2481,7 @@ def successive_halving_search(
             for state in states_list:
                 cols_one_state = [c for c in data.columns if not c.startswith('State_')]+['State_'+state]
                 print(f"Searching models for state: {state}")
-                data_state = data.loc[data["state"]==state, cols_one_state].copy()
+                data_state = data.loc[data["State_"+state]==1, cols_one_state].copy()
 
                 successive_halving_search(
                     model_specs=model_specs,
@@ -2519,7 +2521,7 @@ def successive_halving_search(
     print(f"[grid] total candidates: {len(all_candidates)}")
 
     # Resume logic
-    done_df = _already_done_df(result_csv)
+    done_df = _already_done_df(result_csv, model_per_state)
     done_keys = set()
     if resume and len(done_df):
         for _, r in done_df.iterrows():
