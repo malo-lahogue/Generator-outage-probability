@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 # Robust UTC for all Python versions (3.11+: _dt.UTC, older: _dt.timezone.utc)
-try:
-    UTC = datetime.UTC            # Python 3.11+
-except AttributeError:
-    UTC = datetime.timezone.utc   # Older versions
+# try:
+#     UTC = datetime.UTC            # Python 3.11+
+# except AttributeError:
+#     UTC = datetime.timezone.utc   # Older versions
 
 # ── Third-Party ────────────────────────────────────────────────────────────────
 import numpy as np
@@ -64,6 +64,7 @@ def preprocess_data(
     model_per_state: bool = False,
     dropNA: bool = True,
     feature_na_drop_threshold: float = 0.2,
+    sort_by_date: bool = True,
     seed: Optional[int] = 42,
     ) -> Tuple[pd.DataFrame, List[str], List[str]]:
     """
@@ -386,6 +387,13 @@ def preprocess_data(
     # ---------- Shuffle (optional) ----------
     if randomize:
         merged_count_df = merged_count_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    # ---------- Sort by date (optional) ----------
+    if sort_by_date:
+        if 'Date' in merged_count_df.columns and 'Date' in merged_count_df.index.names:
+            merged_count_df = merged_count_df.drop(columns=['Date'])   
+        merged_count_df = merged_count_df.sort_values(by=["Date"] + (["State"] if "State" in merged_count_df.columns else []))
+        merged_count_df = merged_count_df.reset_index(drop=True)
 
     # ---------- Final column selection ----------
     cols = [c for c in feature_names if c in merged_count_df.columns] + target_columns + ["Data_weight"]
@@ -1146,12 +1154,12 @@ class EarlyStopper:
 
 class MLP(GeneratorFailureProbabilityInference):
     """
-    Multi-Layer Perceptron surrogate (PyTorch).
+        Multi-Layer Perceptron surrogate (PyTorch).
 
-    Provides:
-    - Flexible architecture construction.
-    - Loss-aware training with optional L1/L2 regularization and sample weights.
-    - Predict that honors any standardization set in `prepare_data`.
+        Provides:
+        - Flexible architecture construction.
+        - Loss-aware training with optional L1/L2 regularization and sample weights.
+        - Predict that honors any standardization set in `prepare_data`.
     """
 
     def __init__(self, verbose: bool = True):
@@ -1497,7 +1505,7 @@ class MLP(GeneratorFailureProbabilityInference):
 
         checkpoint = {
             "format_version": 2,
-            "saved_at": datetime.datetime.now(UTC).isoformat(),
+            "saved_at": datetime.datetime.now().astimezone().isoformat(),
             "libs": {
                 "torch": torch.__version__,
                 "numpy": np.__version__,
@@ -2099,7 +2107,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
 
         checkpoint = {
             "format_version": 1,
-            "saved_at": datetime.datetime.now(UTC).isoformat(),
+            "saved_at": datetime.datetime.now().astimezone().isoformat(),
             "libs": {
                 "xgboost": xgb.__version__,
                 "numpy": np.__version__,
@@ -2398,7 +2406,8 @@ def successive_halving_search(
     resume: bool = True,
     subset_strategy: str = "head",   # "head" (time-respecting) or "random"
     subset_seed: int = 42,
-    warm_start: bool = False         # if True: keep MLP weights across levels (XGB still fresh)
+    warm_start: bool = False,         # if True: keep MLP weights across levels (XGB still fresh)
+    verbose=False
     ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], float]]:
     """
     Successive halving over model families (MLP/XGBoost) and their grids.
@@ -2537,7 +2546,8 @@ def successive_halving_search(
                 if len(prev):
                     score = float(prev["min_val_loss"].iloc[0])
                     scored.append((mi, build_params, train_params, score, None, 0))
-                    print(f"[resume] skip level={level_name} model={mname} -> score={score:.6g}")
+                    if verbose:
+                        print(f"[resume] skip level={level_name} model={mname} -> score={score:.6g}")
                     continue
 
             # ---------- Build/prepare/train ----------
@@ -2550,7 +2560,7 @@ def successive_halving_search(
                 model_obj.build_model(**build_kw)
                 model_obj.prepare_data(
                     data=sub_data,
-                    train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=0.0,
+                    train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=1.0-(train_ratio + val_ratio),
                     standardize=standardize
                 )
                 # ensure fresh weights
@@ -2603,7 +2613,7 @@ def successive_halving_search(
                     "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
                     "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
                     "min_val_loss": score,  # kept name for backward-compat
-                    "timestamp": datetime.datetime.now(UTC).isoformat()
+                    "timestamp": datetime.datetime.now().astimezone().isoformat()
                 }
                 write_header = not os.path.exists(result_csv)
                 with open(result_csv, "a", newline="") as f:

@@ -27,7 +27,7 @@ def percent01(x: str) -> float:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Successive-halving grid search for MLP & XGBoost."
+        description="Training of MLP or XGBoost."
     )
 
     # Data paths

@@ -41,10 +41,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log.csv")
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB_new.csv")
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
-    p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result_csv.")
+    p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
 
     # Runtime / reproducibility
     p.add_argument("--seed",   type=int, default=123, help="Random seed for splits / reproducibility.")
@@ -107,12 +107,13 @@ def main() -> None:
         state_one_hot=True,
         cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
         cause_code_n_clusters=args.clusters,
-        feature_na_drop_threshold=0.10
+        feature_na_drop_threshold=0.10,
+        sort_by_date=True,
     )
 
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
-    exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
-    stand_cols = [f for f in feature_cols if not f.startswith("State_") and f not in exclude]
+    exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek",  "DayOfYear", "State"}
+    stand_cols = [f for f in feature_cols if  all([not f.startswith(exc) for exc in exclude])]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
     
 
@@ -131,21 +132,18 @@ def main() -> None:
                         "objective"    : "reg:logistic",
                         "early_stopping_rounds" : 10,
                         "subsample"       : 1.0,
-                        "num_boost_round" : 500,
+                        # "num_boost_round" : 500,
                         "device"          : args.device,     
                         }
-    # xgb_build_grid = {
-    #                     "max_depth":   [4, 6, 8],
-    #                     "eta":         [0.02, 0.05, 0.1],
-    #                     "gamma":       [0.0, 0.25, 0.5, 0.75, 1.0],
-    #                     "reg_lambda":  [0.0, 0.25, 0.5, 0.75, 1.0]
-    #                     }
     xgb_build_grid = {
-                        "max_depth":   [4],
-                        "eta":         [0.02],
-                        "gamma":       [0.0, 0.25],
-                        "reg_lambda":  [0.0, 0.25]
+                        "max_depth":   [2, 4, 6, 8, 10, 12],
+                        "eta":         [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.1],
+                        "gamma":       [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],# [0.0, 0.25, 0.5, 0.75, 1.0],
+                        "reg_lambda":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],#[0.0, 0.25, 0.5, 0.75, 1.0]
+                        #
+                        "num_boost_round" : [1200],# [100, 200, 500, 800, 1200, 1500]
                         }
+
     xgb_common_train = {
                         "weights_data": True,
                         # "seed": args.seed,
@@ -159,16 +157,26 @@ def main() -> None:
     }
     mlp_build_grid = {
         "hidden_sizes": [
-                        (128, 128, 64),
-                        # (256, 128, 64),
-                        # (256, 256, 128, 64),
+                        # (128, 128, 64),#
+                        # (256, 128, 64),#
+                        # (256, 256, 128, 64),#
                         # (256, 256, 256, 128, 64),
+                        # (256, 256, 128, 64,  32, 16, 8, 4),#
+                        # (1024, 256, 64),
+                        # (2048, 512, 64),
+                        # (2048, 512),
+                        (8192, 1024, 64),#
                         ],
         "activations": [
-                        ("relu",) * 3,
+                        # ("relu",) * 3,
                         # ("relu",) * 3,
                         # ("relu",) * 4,
                         # ("relu",) * 5,
+                        # ("relu",) * 8,
+                        # ("relu",) * 3,
+                        # ("relu",) * 3,
+                        # ("relu",) * 2,
+                        ("relu",) * 3,
                         ],
     }
     mlp_common_train =  {
@@ -182,25 +190,24 @@ def main() -> None:
                         "lr_scheduler": "plateau",
                         # "seed": args.seed,
                         }
-    # mlp_train_grid = {
-    #                 "lambda_reg"          : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
-    #                 "epochs"              : [2000],   # upper bound — levels will cap
-    #                 "batch_size"          : [128, 256],
-    #                 "lr"                  : [1e-4, 2e-4, 4e-4, 1e-3],
-    #                 }
+    
     mlp_train_grid = {
-                    "lambda_reg"          : [5e-5],
+                    "lambda_reg"          : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
                     "epochs"              : [2000],   # upper bound — levels will cap
-                    "batch_size"          : [128],
-                    "lr"                  : [1e-4, 2e-4],
-                    "patience"            : [10],
-                    "min_delta"           : [1e-4],
-                    "flat_delta"          : [1e-3],
-                    "flat_patience"       : [20],
+                    "batch_size"          : [128, 256],
+                    "lr"                  : [1e-4, 2e-4, 4e-4, 1e-3],
+                    "patience"            : [50],
+                    "min_delta"           : [5e-5],
+                    "flat_delta"          : [1e-4],
+                    "flat_patience"       : [50],
                     "flat_mode"           : ['iqr'],
                     "rel_flat"            : [2e-3],
-                    "burn_in"             : [10],
+                    "burn_in"             : [150],
                     }
+    #                 Stop only when BOTH conditions hold:
+    #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
+    #                   • Flat-window: variability in last `flat_patience` epochs <= flat_delta (abs or relative).
+
 
     # Choose models from CLI
     include_xgb = "xgb" in args.models or "both" in args.models
@@ -235,8 +242,8 @@ def main() -> None:
     # Training levels (successive halving caps)
     n_rows = len(data_df)
     training_levels = [
-        {"name": "L1-fast",   "epochs": 150,  "data_cap": int(n_rows * 0.40)},
-        {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
+        {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.60)},
+        # {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
         # {"name": "L3-full",   "epochs": 2000, "data_cap": None},
     ]
 
