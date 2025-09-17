@@ -2407,48 +2407,50 @@ def successive_halving_search(
     subset_strategy: str = "head",   # "head" (time-respecting) or "random"
     subset_seed: int = 42,
     warm_start: bool = False,         # if True: keep MLP weights across levels (XGB still fresh)
-    verbose=False
+    verbose=False,
+    model_per_state: bool = False,  # if True: save model checkpoint per state (level,candidate)
     ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], float]]:
     """
-    Successive halving over model families (MLP/XGBoost) and their grids.
+        Successive halving over model families (MLP/XGBoost) and their grids.
 
-    Returns the survivors of the last level as a list of tuples:
-      (model_index, build_params, train_params, score)
+        Returns the survivors of the last level as a list of tuples:
+        (model_index, build_params, train_params, score)
 
-    Notes on training state:
-      - Default behavior (**warm_start=False**): every candidate at every level
-        is trained from scratch (fresh model instance, fresh weights).
-      - If **warm_start=True**: for MLP candidates only, we keep the same model
-        object across levels and train **additional** epochs instead of restarting.
-        XGBoost still re-trains fresh each level (continuation is non-trivial).
-    INPUTS:
-        - model_specs (list[dict]) : List of model specifications. Each spec:
-                                            {
-                                            "name": "MLP" or "xgboostModel",
-                                            "constructor": callable -> returns a fresh model instance,
-                                            "build_grid": dict of lists for build_model kwargs,
-                                            "train_grid": dict of lists for train_model kwargs,
-                                            "common_build": dict of fixed build_model kwargs,
-                                            "common_train": dict of fixed train_model kwargs
-                                            }
-        - data (pd.DataFrame) : Full dataset with features, targets, optional 'Data_weight' column.
-        - standardize (list[str] | bool) : If True, standardize all features and targets. If list, standardize only those columns.
-        - result_csv (str) : Path to CSV file to log results (appended if exists).
-        - train_ratio (float) : Fraction of data for training (rest for validation).
-        - val_ratio (float) : Fraction of data for validation (rest for training).
-        - val_metric_per_model (dict[str,str] | None) : Optional per-model validation metric overrides.
-        - levels (list[dict] | None) : List of levels. Each level:
-                                            {
-                                            "name": str,
-                                            "epochs": int,
-                                            "data_cap": int | None  (max training samples; None = all)
-                                            }
-                                        If None, defaults to 3 levels with 40%, 80%, and 100% of data and 150, 500, 2000 epochs.
-        - top_keep_ratio (float) : Fraction of candidates to keep after each level (e.g., 0.33 keeps top third).
-        - resume (bool) : If True, skip candidates already present in result_csv.
-        - subset_strategy (str) : "head" (time-respecting) or "random" subset when data_cap is set.
-        - subset_seed (int) : Random seed for "random" subset strategy.
-        - warm_start (bool) : If True, keep MLP weights across levels (XGB still fresh).
+        Notes on training state:
+        - Default behavior (**warm_start=False**): every candidate at every level
+            is trained from scratch (fresh model instance, fresh weights).
+        - If **warm_start=True**: for MLP candidates only, we keep the same model
+            object across levels and train **additional** epochs instead of restarting.
+            XGBoost still re-trains fresh each level (continuation is non-trivial).
+        INPUTS:
+            - model_specs (list[dict]) : List of model specifications. Each spec:
+                                                {
+                                                "name": "MLP" or "xgboostModel",
+                                                "constructor": callable -> returns a fresh model instance,
+                                                "build_grid": dict of lists for build_model kwargs,
+                                                "train_grid": dict of lists for train_model kwargs,
+                                                "common_build": dict of fixed build_model kwargs,
+                                                "common_train": dict of fixed train_model kwargs
+                                                }
+            - data (pd.DataFrame) : Full dataset with features, targets, optional 'Data_weight' column.
+            - standardize (list[str] | bool) : If True, standardize all features and targets. If list, standardize only those columns.
+            - result_csv (str) : Path to CSV file to log results (appended if exists).
+            - train_ratio (float) : Fraction of data for training (rest for validation).
+            - val_ratio (float) : Fraction of data for validation (rest for training).
+            - val_metric_per_model (dict[str,str] | None) : Optional per-model validation metric overrides.
+            - levels (list[dict] | None) : List of levels. Each level:
+                                                {
+                                                "name": str,
+                                                "epochs": int,
+                                                "data_cap": int | None  (max training samples; None = all)
+                                                }
+                                            If None, defaults to 3 levels with 40%, 80%, and 100% of data and 150, 500, 2000 epochs.
+            - top_keep_ratio (float) : Fraction of candidates to keep after each level (e.g., 0.33 keeps top third).
+            - resume (bool) : If True, skip candidates already present in result_csv.
+            - subset_strategy (str) : "head" (time-respecting) or "random" subset when data_cap is set.
+            - subset_seed (int) : Random seed for "random" subset strategy.
+            - warm_start (bool) : If True, keep MLP weights across levels (XGB still fresh).
+            - model_per_state (bool) : If True, save model checkpoint per state (level,candidate).
     """
     # default levels
     if levels is None:
@@ -2458,6 +2460,47 @@ def successive_halving_search(
             {"name": "L2-medium", "epochs": 500,  "data_cap": int(N * 0.8)},
             {"name": "L3-full",   "epochs": 2000, "data_cap": None},
         ]
+
+    if model_per_state:
+        states_list = [feat_state.split('_')[1] for feat_state in data.columns if feat_state.startswith('State_')]
+        print("Will search model per state")
+        print(f"States found: {states_list}")
+
+        for m in model_specs:
+            m["common_build"]["feature_cols"] = [c for c in m["common_build"].get("feature_cols", []) if not c.startswith('State_')]
+
+
+
+        if len(states_list) == 0:
+            raise ValueError("model_per_state=True but no 'State_' columns found in data.")
+        if len(states_list) > 1: # do the search per state
+            for m in model_specs:
+                m["common_build"]["feature_cols"] = [c for c in m["common_build"].get("feature_cols", []) if not c.startswith('State_')]
+            for state in states_list:
+                cols_one_state = [c for c in data.columns if not c.startswith('State_')]+['State_'+state]
+                print(f"Searching models for state: {state}")
+                data_state = data.loc[data["state"]==state, cols_one_state].copy()
+
+                successive_halving_search(
+                    model_specs=model_specs,
+                    data=data_state,
+                    standardize=standardize,
+                    result_csv=result_csv,
+                    train_ratio=train_ratio,
+                    val_ratio=val_ratio,
+                    val_metric_per_model=val_metric_per_model,  # e.g. {"xgboostModel": "logloss", "MLP": "logloss"}
+                    levels=levels,
+                    top_keep_ratio=top_keep_ratio,
+                    resume=resume,
+                    subset_strategy=subset_strategy,   # "head" (time-respecting) or "random"
+                    subset_seed=subset_seed,
+                    warm_start=warm_start,
+                    verbose=False,
+                    model_per_state=model_per_state,
+                )
+        if len(states_list) == 1: # only one state, do the search
+            state_searching = states_list[0]
+
 
     # Build all (model_index, build_params, train_params)
     all_candidates: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
@@ -2480,7 +2523,10 @@ def successive_halving_search(
     done_keys = set()
     if resume and len(done_df):
         for _, r in done_df.iterrows():
-            done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
+            if model_per_state:
+                done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"],r["state"]))
+            else:
+                done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
 
     # Survivors structure:
     # - fresh mode: list of (mi, build_params, train_params)
@@ -2536,12 +2582,15 @@ def successive_halving_search(
 
             # Resume skip?
             key = _row_key(level_name, mname, build_kw, train_kw)
+            if model_per_state:
+                key = (state_searching, *key)
             if not warm_start and resume and key in done_keys:
                 prev = done_df.loc[
                     (done_df["level"] == level_name) &
                     (done_df["model_name"] == mname) &
                     (done_df["build_params"] == key[2]) &
-                    (done_df["train_params"] == key[3])
+                    (done_df["train_params"] == key[3]) &
+                    (done_df["state"] == state_searching if model_per_state else True)
                 ]
                 if len(prev):
                     score = float(prev["min_val_loss"].iloc[0])
@@ -2607,14 +2656,25 @@ def successive_halving_search(
             # ---------- Log row ----------
             if result_csv:
                 os.makedirs(os.path.dirname(result_csv), exist_ok=True)
-                row = {
-                    "level": level_name,
-                    "model_name": mname,
-                    "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
-                    "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
-                    "min_val_loss": score,  # kept name for backward-compat
-                    "timestamp": datetime.datetime.now().astimezone().isoformat()
-                }
+                if model_per_state:
+                    row = {
+                        "state": state_searching,
+                        "level": level_name,
+                        "model_name": mname,
+                        "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
+                        "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
+                        "min_val_loss": score,  # kept name for backward-compat
+                        "timestamp": datetime.datetime.now().astimezone().isoformat()
+                    }
+                else:
+                    row = {
+                        "level": level_name,
+                        "model_name": mname,
+                        "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
+                        "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
+                        "min_val_loss": score,  # kept name for backward-compat
+                        "timestamp": datetime.datetime.now().astimezone().isoformat()
+                    }
                 write_header = not os.path.exists(result_csv)
                 with open(result_csv, "a", newline="") as f:
                     w = csv.DictWriter(f, fieldnames=list(row.keys()))
