@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB_new.csv")
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_XGB_new.csv")
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
@@ -103,6 +103,7 @@ def main() -> None:
         weather_data_path=args.weather,
         power_data_path=args.powerload,
         feature_names=feature_names,
+        randomize=False,
         target=args.target,
         state_one_hot=True,
         cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
@@ -141,7 +142,7 @@ def main() -> None:
                         "gamma":       [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],# [0.0, 0.25, 0.5, 0.75, 1.0],
                         "reg_lambda":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],#[0.0, 0.25, 0.5, 0.75, 1.0]
                         #
-                        "num_boost_round" : [1200],# [100, 200, 500, 800, 1200, 1500]
+                        "num_boost_round" : [100, 200],# [100, 200, 500, 800, 1200, 1500]
                         }
 
     xgb_common_train = {
@@ -243,8 +244,8 @@ def main() -> None:
     n_rows = len(data_df)
     training_levels = [
         {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.60)},
-        # {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
-        # {"name": "L3-full",   "epochs": 2000, "data_cap": None},
+        {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
+        {"name": "L3-full",   "epochs": 2000, "data_cap": None},
     ]
 
     # ---------- Run search ----------

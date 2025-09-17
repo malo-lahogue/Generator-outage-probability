@@ -58,7 +58,7 @@ def preprocess_data(
     feature_names: List[str],
     target: str = "Frequency",
     cause_code_n_clusters: int = 1,
-    randomize: bool = True,
+    randomize: bool = False,
     state_one_hot: bool = True,
     cyclic_features: List[str] = None,
     model_per_state: bool = False,
@@ -386,7 +386,7 @@ def preprocess_data(
 
     # ---------- Shuffle (optional) ----------
     if randomize:
-        merged_count_df = merged_count_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        merged_count_df = merged_count_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
     # ---------- Sort by date (optional) ----------
     if sort_by_date:
