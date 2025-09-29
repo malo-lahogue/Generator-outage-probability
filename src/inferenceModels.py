@@ -2502,6 +2502,9 @@ def successive_halving_search(
                 )
         if len(states_list) == 1: # only one state, do the search
             state_searching = states_list[0]
+        else:
+            # Already done the search
+            return []
 
 
     # Build all (model_index, build_params, train_params)
@@ -2529,6 +2532,7 @@ def successive_halving_search(
                 done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"],r["state"]))
             else:
                 done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
+
 
     # Survivors structure:
     # - fresh mode: list of (mi, build_params, train_params)
@@ -2585,7 +2589,9 @@ def successive_halving_search(
             # Resume skip?
             key = _row_key(level_name, mname, build_kw, train_kw)
             if model_per_state:
-                key = (state_searching, *key)
+                key = (*key, state_searching)
+
+
             if not warm_start and resume and key in done_keys:
                 prev = done_df.loc[
                     (done_df["level"] == level_name) &
