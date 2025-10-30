@@ -138,13 +138,14 @@ def main() -> None:
 
 
     elif "mlp" in args.models:
-        mlp_model = im.MLP(verbose=False)
+        mlp_model = im.MLP(verbose=True)
         mlp_model.build_model(feature_cols=feature_cols,
                             target_cols=target_cols,
-                            hidden_sizes=(100, 50),
-                            activations=('relu', 'relu'),
+                            hidden_sizes=[80],
+                            activations=["relu"],
                             out_act_fn='sigmoid')
         mlp_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
+        print('here')
         mlp_model.train_model(optimizer='adam',
                               loss = 'logloss',
                               regularization_type = 'L2',
@@ -161,8 +162,9 @@ def main() -> None:
                               grad_clip_norm=1.0,
                               lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
 
-        path_to_save = THIS_DIR / "../Results/Models" / "MLP_model.pth"
-        mlp_model.save_model(path_to_save)
+        # path_to_save = THIS_DIR / "../Results/Models" / "MLP_model.pth"
+        # mlp_model.save_model(path_to_save)
+
 
     t_end = time()
     print(f"Training completed in {t_end - t_start:.1f} seconds.")
