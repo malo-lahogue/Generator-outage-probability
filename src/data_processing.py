@@ -7,6 +7,7 @@ import os
 import itertools
 
 
+
 data_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'DATA/raw')
 
 
@@ -112,16 +113,22 @@ def load_performances(perf_per_year = None, years = None, columns = None):
     return perf_df
 
 
-def filter_events(events_df, CauseCodes=['U1', 'U2', 'U3', 'D1', 'D2', 'D3'], filter_fuel=True, exclude_states=['Other','Mexico','South America'], include_states=None):
+def filter_events(events_df, CauseCodes=['U1', 'U2', 'U3', 'D1', 'D2', 'D3', 'SF'], filter_fuel=False, exclude_states=['Other','Mexico','South America'], include_states=None, add_fuel_failure=True):
     """
     Clean the events DataFrame by
-    1. Keeping only unplanned outages and deratings (U1, U2, U3, D1, D2, D3)
+    1. Keeping only events with the desired cause codes
     2. Removing duplicate events
     3. If filter_fuel is True, keeping only events with gas as the fuel type
     4. Adding the unit's location (state and region)
     """
+    if filter_fuel and not add_fuel_failure:
+        raise Warning("If filter_fuel is True, add_fuel_failure must also be True")
     # 1. Keep only desired events (unplanned outages)
+    print("Filtering events by cause codes...")
+    n_initial = events_df.shape[0]
     events_df = events_df.loc[events_df['EventTypeCode'].isin(CauseCodes)].copy()
+    n_filtered = events_df.shape[0]
+    print(f"Kept {n_filtered} events out of {n_initial} ({100*n_filtered/n_initial:.2f}%) after filtering by cause codes.")
 
 
     # 2. Remove duplicates
@@ -143,26 +150,28 @@ def filter_events(events_df, CauseCodes=['U1', 'U2', 'U3', 'D1', 'D2', 'D3'], fi
     events_filtered_df = pd.DataFrame.from_dict(events_filtered, orient='index').reset_index(drop=True)
 
     # 3. Keep events with the right fuel type
-    units_performance = load_performances()
+    if add_fuel_failure:
+        units_performance = load_performances()
 
-    fuel_used_failure = []
-    for _, row in tqdm(events_filtered_df.iterrows(), total=events_filtered_df.shape[0], desc='Matching fuels'):
-        unitid = row['UnitID']
-        start = row['EventStartDT']
-        perf = units_performance.loc[(units_performance['UnitID'] == unitid)&(units_performance['ReportingYearNbr']==start.year)&(units_performance['ReportingMonthNbr']==start.month)]
-        if perf.empty:
-            # print(f'No performance data for unit {unitid} at {start}')
-            fuel_used_failure.append(None)
-            continue
-        fuel = perf['FuelCodeName1'].values[0] if perf['FuelSequenceName1'].values[0] == 'Primary Fuel' else perf['FuelCodeName2'].values[0] if perf['FuelSequenceName2'].values[0] == 'Primary Fuel' else None
-        fuel_used_failure.append(fuel)
+        fuel_used_failure = []
+        for _, row in tqdm(events_filtered_df.iterrows(), total=events_filtered_df.shape[0], desc='Matching fuels'):
+            unitid = row['UnitID']
+            start = row['EventStartDT']
+            perf = units_performance.loc[(units_performance['UnitID'] == unitid)&(units_performance['ReportingYearNbr']==start.year)&(units_performance['ReportingMonthNbr']==start.month)]
+            if perf.empty:
+                # print(f'No performance data for unit {unitid} at {start}')
+                fuel_used_failure.append(None)
+                continue
+            fuel = perf['FuelCodeName1'].values[0] if perf['FuelSequenceName1'].values[0] == 'Primary Fuel' else perf['FuelCodeName2'].values[0] if perf['FuelSequenceName2'].values[0] == 'Primary Fuel' else None
+            fuel_used_failure.append(fuel)
 
-    events_filtered_df['FuelFailure'] = fuel_used_failure
+        events_filtered_df['FuelFailure'] = fuel_used_failure
 
-    if filter_fuel:
-        gas_fuels = ['Gas', 'Propane', 'Other - Gas (Cu. Ft.)', 'Other Gas (Cu Ft)']
-        events_filtered_df = events_filtered_df.loc[events_filtered_df['FuelFailure'].isin(gas_fuels)].copy()
-        events_filtered_df.sort_values(by='EventStartDT', inplace=True)
+        if filter_fuel:
+            gas_fuels = ['Gas', 'Propane', 'Other - Gas (Cu. Ft.)', 'Other Gas (Cu Ft)']
+            events_filtered_df = events_filtered_df.loc[events_filtered_df['FuelFailure'].isin(gas_fuels)].copy()
+            events_filtered_df.sort_values(by='EventStartDT', inplace=True)
+    
 
     # 4. get the unit's location
     States = []
@@ -222,3 +231,26 @@ def num_units_gas():
 
     return num_units_gas_df
 
+
+def get_units_start_end():
+    """
+    Get the first and last operation date for each unit in the performance DataFrame.
+    INPUTS:
+    perf_df: DataFrame, performance data
+    OUTPUTS:
+    units_start_end_df: DataFrame, first and last operation date for each unit
+    """
+    perf_df = load_performances()
+    units_start_end = {"UnitID": [], "First_Operation_Date": [], "Last_Operation_Date": []}
+    for unit in tqdm(perf_df['UnitID'].unique()):
+        unit_df = perf_df[perf_df['UnitID'] == unit]
+        first_date = unit_df[['ReportingYearNbr', 'ReportingMonthNbr']].sort_values(by=['ReportingYearNbr', 'ReportingMonthNbr']).iloc[0]
+        last_date = unit_df[['ReportingYearNbr', 'ReportingMonthNbr']].sort_values(by=['ReportingYearNbr', 'ReportingMonthNbr']).iloc[-1]
+        first_op_date = pd.Timestamp(year=int(first_date['ReportingYearNbr']), month=int(first_date['ReportingMonthNbr']), day=1)
+        last_op_date = pd.Timestamp(year=int(last_date['ReportingYearNbr']), month=int(last_date['ReportingMonthNbr']), day=1) + pd.offsets.MonthEnd(1)
+        units_start_end['UnitID'].append(unit)
+        units_start_end['First_Operation_Date'].append(first_op_date)
+        units_start_end['Last_Operation_Date'].append(last_op_date)
+    
+    units_start_end_df = pd.DataFrame(units_start_end)
+    return units_start_end_df
