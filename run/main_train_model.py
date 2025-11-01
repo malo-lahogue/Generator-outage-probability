@@ -156,24 +156,23 @@ def main() -> None:
         mlp_model.build_model(**build_params)
 
         mlp_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
-        # mlp_model.train_model(optimizer='adam',
-        #                       loss = 'logloss',
-        #                       regularization_type = 'L2',
-        #                       lambda_reg=4e-4,
-        #                       weights_data=True,
-        #                       epochs=500,
-        #                       batch_size=256,
-        #                       lr=1e-3,
-        #                       device=args.device,
-        #                       # smart stopping knobs
-        #                       early_stopping=True, patience=15, min_delta=1e-4,
-        #                       flat_delta=1e-3, flat_patience=20, flat_mode='iqr', rel_flat=2e-3, burn_in=10,
-        #                       # stability & LR policy
-        #                       grad_clip_norm=1.0,
-        #                       lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
-        mlp_model.train_model(**train_params)
+        mlp_model.train_model(optimizer='adam',
+                              loss = 'logloss',
+                              regularization_type = 'L2',
+                              lambda_reg=4e-4,
+                              weights_data=True,
+                              epochs=500,
+                              batch_size=256,
+                              lr=1e-3,
+                              device=args.device,
+                              # smart stopping knobs
+                              early_stopping=True, patience=15, min_delta=1e-4,
+                              flat_delta=1e-3, flat_patience=20, flat_mode='iqr', rel_flat=2e-3, burn_in=10,
+                              # stability & LR policy
+                              grad_clip_norm=1.0,
+                              lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
 
-        path_to_save = THIS_DIR / "../Results/Models" / "MLP_global_model.pth"
+        path_to_save = THIS_DIR / "../Results/Models" / "MLP_model.pth"
         mlp_model.save_model(path_to_save)
 
     t_end = time()

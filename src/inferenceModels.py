@@ -359,17 +359,18 @@ def preprocess_data(
     # ---------- Unit expansion vs. frequency weighting ----------
     if target == "Unit_Failure":
         # Expand to per-unit rows with one-hot cluster targets
-        avail = merged_count_df["NumAvailUnits"].to_numpy(dtype=np.int64)
+        n_avail = merged_count_df["NumAvailUnits"].to_numpy(dtype=np.int64)
         fail_mat = merged_count_df[target_columns].fillna(0).to_numpy(dtype=np.int64)
         n_rows, n_clusters = fail_mat.shape
-        assert np.all(avail >= fail_mat.sum(axis=1)), "NumAvailUnits must be >= sum of failures for each (Date, State)."
+        assert np.all(n_avail >= fail_mat.sum(axis=1)), "NumAvailUnits must be >= sum of failures for each (Date, State)."
 
-        total_units = int(avail.sum())
-        X_base = merged_count_df[feature_names].to_numpy()
-        X_rep = np.repeat(X_base, avail, axis=0)
+        total_units = int(n_avail.sum())
+        # X_base = merged_count_df[feature_names].to_numpy()
+        X_base = merged_count_df.to_numpy()
+        X_rep = np.repeat(X_base, n_avail, axis=0)
 
         Y = np.zeros((total_units, n_clusters), dtype=np.int8)
-        offsets = np.concatenate(([0], np.cumsum(avail)))
+        offsets = np.concatenate(([0], np.cumsum(n_avail)))
         for i in range(n_rows):
             pos = offsets[i]
             for k, cnt in enumerate(fail_mat[i]):
@@ -377,7 +378,8 @@ def preprocess_data(
                     Y[pos:pos+cnt, k] = 1
                     pos += cnt
 
-        merged_count_df = pd.DataFrame(X_rep, columns=feature_names)
+        # merged_count_df = pd.DataFrame(X_rep, columns=feature_names)
+        merged_count_df = pd.DataFrame(X_rep, columns=merged_count_df.columns)
         for k, col in enumerate(target_columns):
             merged_count_df[col] = Y[:, k]
         merged_count_df["Data_weight"] = 1.0
@@ -1010,7 +1012,7 @@ class GeneratorFailureProbabilityInference:
         plt.tight_layout()
         plt.show()
 
-    def plot_feature_mapping(self, max_features: int = 10, test_data: pd.DataFrame | None = None) -> None:
+    def plot_feature_mapping(self, max_features: int = 10, test_data: pd.DataFrame | None = None, n_width=5) -> None:
         """
         Scatter target/prediction vs each top feature, weighted by 'Data_weight' if present.
 
@@ -1041,8 +1043,8 @@ class GeneratorFailureProbabilityInference:
         )
 
         # plot
-        rows = int(np.ceil(max_features / 5))
-        fig, axs = plt.subplots(rows, 5, figsize=(12, 3 * rows))
+        rows = int(np.ceil(max_features / n_width))
+        fig, axs = plt.subplots(rows, n_width, figsize=(int(2.4*n_width), 3 * rows))
         axs = axs.flatten()
         i = 0
         for _, row in imp_df.iterrows():
@@ -2213,7 +2215,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
 
     # ---------------------- Importance (XGBoost booster) ----------------------
 
-    def get_feature_importance(self, importance_type: str = 'gain') -> dict[str, float]:
+    def get_feature_importance(self, importance_type: str = 'weight') -> dict[str, float]:
         """
         Return feature importance from the fitted booster.
 
@@ -2226,7 +2228,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         booster = self.model.get_booster()
         return booster.get_score(importance_type=importance_type)
 
-    def plotFeatureImportance(self, importance_criterions: list[str] = ['weight', 'gain', 'cover'], n_features: int = 10) -> None:
+    def plotFeatureImportance(self, importance_criterions: list[str] = ['weight', 'gain', 'cover'], n_features: int = 10, exclude_states=True) -> None:
         """
         Plot the top N features for several importance criteria.
 
@@ -2237,18 +2239,22 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         OUTPUTS:
         - None
         """
-        fig, axs = plt.subplots(1, len(importance_criterions), figsize=(6 * len(importance_criterions), n_features))
+        fig, axs = plt.subplots(len(importance_criterions), 1, figsize=(n_features, 6 * len(importance_criterions)))
         axs = np.atleast_1d(axs)
-
-        for i, criterion in enumerate(importance_criterions):
+        i = 0
+        for j, criterion in enumerate(importance_criterions):
             importance = self.get_feature_importance(importance_type=criterion)
             imp_df = pd.DataFrame(list(importance.items()), columns=['Feature', 'Importance']).sort_values(
                 by='Importance', ascending=False
             ).reset_index(drop=True)
-            axs[i].barh(imp_df['Feature'][:n_features], imp_df['Importance'][:n_features])
-            axs[i].set_xlabel('Importance')
-            axs[i].set_title(f'Feature Importance - {criterion}')
-            axs[i].invert_yaxis()
+            if exclude_states:
+                imp_df = imp_df[~imp_df['Feature'].str.contains('State')]
+            axs[j].bar(imp_df['Feature'][:n_features], imp_df['Importance'][:n_features])
+            axs[j].set_xlabel('Importance', fontsize=20)
+            axs[j].set_title(f'Feature Importance - {criterion}', fontsize=20)
+            axs[j].set_xticklabels(imp_df['Feature'][:n_features], rotation=45, ha='right', fontsize=20)
+            axs[j].set_ylabel('Importance Score', fontsize=20)
+            i += 1
 
         plt.tight_layout()
         plt.show()
