@@ -2476,6 +2476,10 @@ def successive_halving_search(
         if len(states_list) == 0:
             raise ValueError("model_per_state=True but no 'State_' columns found in data.")
         if len(states_list) > 1: # do the search per state
+            results_folder_name = '.'.join(result_csv.split('.')[:-1])
+            print("Results folder name : ", results_folder_name)
+            os.makedirs(results_folder_name, exist_ok=True)
+
             for m in model_specs:
                 m["common_build"]["feature_cols"] = [c for c in m["common_build"].get("feature_cols", []) if not c.startswith('State_')]
             for state in states_list:
@@ -2487,7 +2491,7 @@ def successive_halving_search(
                     model_specs=model_specs,
                     data=data_state,
                     standardize=standardize,
-                    result_csv=result_csv,
+                    result_csv=results_folder_name,
                     train_ratio=train_ratio,
                     val_ratio=val_ratio,
                     val_metric_per_model=val_metric_per_model,  # e.g. {"xgboostModel": "logloss", "MLP": "logloss"}
@@ -2502,6 +2506,9 @@ def successive_halving_search(
                 )
         if len(states_list) == 1: # only one state, do the search
             state_searching = states_list[0]
+
+            result_csv = result_csv + '/_state_'+str(state_searching) + ".csv"
+            print(result_csv)
         else:
             # Already done the search
             return []

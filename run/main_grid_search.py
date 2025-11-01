@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB_new.csv")
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB.csv")
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
@@ -132,22 +132,21 @@ def main() -> None:
                         "eval_metric"  : "logloss",
                         "objective"    : "reg:logistic",
                         "early_stopping_rounds" : 10,
-                        "subsample"       : 1.0,
                         "device"          : args.device,     
                         }
     xgb_build_grid = {
-                        "max_depth":   [2, 4, 6, 8, 10, 12],
-                        "eta":         [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.1],
-                        "gamma":       [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],# [0.0, 0.25, 0.5, 0.75, 1.0],
-                        "reg_lambda":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],#[0.0, 0.25, 0.5, 0.75, 1.0]
-                        #
-                        "num_boost_round" : [100],# [100, 200, 500, 800, 1200, 1500] [100, 1200, 1500]
-                        }
+                        "max_depth":   [4, 6, 8, 10],
+                        "eta":         [0.04, 0.05, 0.06, 0.07, 0.08, 0.1],
+                        "gamma":       [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                        "reg_lambda":  [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                        "subsample"       : [0.7, 0.8, 0.85, 0.9, 0.95, 1.0],
+                        "num_boost_round" : [500]#[50, 100, 200, 500, 800] #100:4862667;   200:4862669;   500:4854137;   800:4854139   /4904 per state & sum_boost_round = 230,485 per num_boost = 921,940 total = 711.86 MB
+                        } #462.35 MB = 598,800 /# 13 data points per 0.01 MB
 
     xgb_common_train = {
                         "weights_data": True,
                         # "seed": args.seed,
-                     }
+                     } #14,700=>24.91MB
 
     # 2) MLP
     mlp_common_build = {
@@ -157,26 +156,18 @@ def main() -> None:
     }
     mlp_build_grid = {
         "hidden_sizes": [
-                        (128, 128, 64),#
-                        # (256, 128, 64),#
-                        # (256, 256, 128, 64),#
-                        # (256, 256, 256, 128, 64),
-                        # (256, 256, 128, 64,  32, 16, 8, 4),#
-                        # (1024, 256, 64),
-                        # (2048, 512, 64),
-                        # (2048, 512),
+                        (128, 128, 64), #
+                        # (256, 128, 64), #
+                        # (256, 256, 128, 64), #
+                        # (256, 256, 256, 128, 64), #
+                        # (256, 256, 128, 64,  32, 16, 8, 4), ##4839016
+                        # (1024, 256, 64), #
+                        # (2048, 512, 64), #
+                        # (2048, 512),#
                         # (8192, 1024, 64),#
                         ],
         "activations": [
                         ("relu",) * 3,
-                        # ("relu",) * 3,
-                        # ("relu",) * 4,
-                        # ("relu",) * 5,
-                        # ("relu",) * 8,
-                        # ("relu",) * 3,
-                        # ("relu",) * 3,
-                        # ("relu",) * 2,
-                        # ("relu",) * 3,
                         ],
     }
     mlp_common_train =  {
