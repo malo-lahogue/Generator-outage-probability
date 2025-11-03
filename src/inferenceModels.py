@@ -49,101 +49,122 @@ torch.manual_seed(0)
 
 
 
-
 def preprocess_data(
-    failure_path: str,
-    event_count_path: str,
+    failure_data_path: str,
     weather_data_path: str,
-    power_data_path: str,
+    power_load_data_path: str,
     feature_names: List[str],
-    target: str = "Frequency",
-    cause_code_n_clusters: int = 1,
-    randomize: bool = False,
+    initial_MC_state_filter: str = 'all',
+    technology_filter: List[str] = None,
     state_one_hot: bool = True,
     cyclic_features: List[str] = None,
-    model_per_state: bool = False,
+    standardize_load_per_state: bool = True,
     dropNA: bool = True,
     feature_na_drop_threshold: float = 0.2,
     sort_by_date: bool = True,
     seed: Optional[int] = 42,
-    ) -> Tuple[pd.DataFrame, List[str], List[str]]:
+) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, int]]]:
     """
-        Pre-process and align multiple daily, state-indexed datasets (failures, event counts,
-        weather, and power-load), enrich them with calendar/cyclic signals, optionally cluster
-        cause codes, and construct model-ready features/targets.
+    Preprocess and merge generator failure, weather, and power-load datasets at daily, state-level resolution.
 
-        The function:
-        1) Loads the four CSVs and normalizes their indices to a common MultiIndex (Date, State).
-        2) Selects only requested features that actually exist; drops columns with too many NaNs.
-        3) Merges weather and power-load features into the event-count table (inner join on Date/State).
-        4) Adds calendar features (Season/Month/DayOfWeek/DayOfYear/Holiday/Weekend) if requested.
-        5) Encodes the 'State' either as one-hot columns (State_*) or as a single numeric category.
-        6) Optionally encodes any listed cyclic features into sine/cosine pairs (e.g., Month → Month_sin/cos).
-        7) Builds targets:
-        - If cause_code_n_clusters == 1: a single target C_0 (failures or frequency).
-        - If >1: clusters cause codes via k-means over feature means, then counts failures per cluster
-            and produces targets C_0..C_{K-1} (raw counts or frequencies).
-        In all cases, also computes a global Frequency = NumFailingUnits / NumAvailUnits (clipped to [0, 1]).
-        8) Formats the supervised task:
-        - target == 'Frequency': returns one row per (Date, State) with targets as rates;
-            sets Data_weight = NumAvailUnits (useful for weighted losses).
-        - target == 'Unit_Failure': expands to one row per available unit with one-hot targets for
-            failing clusters; sets Data_weight = 1.
-        9) Optionally shuffles rows deterministically.
-        10) Returns a float64 DataFrame containing only [features + targets + Data_weight], plus the
-            final feature and target name lists.
+    Steps:
+    1. Loads failure data, weather data, and power load data from CSV files.
+    2. Normalizes time and state formats, applies optional filters on technology and initial MC state.
+    3. Selects only specified feature columns that exist and drops any with too many NaNs.
+    4. Merges datasets on (Datetime_UTC, State), handling calendar normalization and optional NaN row dropping.
+    5. Optionally one-hot encodes states and cyclically encodes seasonal/calendar features.
+    6. Encodes categorical columns (e.g., Technology, Final_gen_state) as integers.
+    7. Constructs model-ready features and targets (with optional clustering logic if extended).
+    8. Returns a clean float64 dataframe ready for ML input.
 
-        INPUTS:
-            - failure_path (str) : Path to the CSV with unit-level failures, including at least ['EventStartDT','State','CauseCode','UnitID'].
-            - event_count_path (str) : Path to the CSV with daily state-level counts, indexed by ['EventStartDT','State'] and including ['NumAvailUnits','NumFailingUnits'].
-            - weather_data_path (str) : Path to the CSV with weather features indexed by ['Date','State']; columns may include the names in feature_names.
-            - power_data_path (str) : Path to the CSV with power-load features indexed by ['Date','State']; columns may include the names in feature_names.
-            - feature_names (List[str]) : Candidate feature columns to include from weather/power-load (plus optional calendar/cyclic features). Nonexistent names are ignored; dropped if NaN fraction > threshold.
-            - target (str) : Target mode: 'Frequency' (default, per-(Date,State) rates) or 'Unit_Failure' (per-unit expansion with one-hot cluster labels).
-            - cause_code_n_clusters (int) : If 1, aggregate “any cause” as a single target C_0. If >1, cluster CauseCode into this many groups and produce C_0..C_{K-1}.
-            - randomize (bool) : If True, shuffles the final rows (deterministic if seed is provided).
-            - state_one_hot (bool) : If True and not model_per_state, one-hot encodes the State as State_* columns; otherwise keeps a single numeric/categorical 'State' column.
-            - cyclic_features (List[str]) : Feature names to encode as sine/cosine pairs (e.g., ['Month','DayOfWeek']). Skips quietly if a name is absent; handles degenerate ranges.
-            - model_per_state (bool) : If True, keeps a single 'State' column for external per-state training (no one-hot).
-            - dropNA (bool) : If True, drops rows with missing values after merge and feature engineering.
-            - feature_na_drop_threshold (float) : Drop any feature column whose NaN fraction exceeds this threshold (e.g., 0.2 → drop if >20% NaN).
-            - seed (Optional[int]) : Random seed for deterministic shuffling and clustering initialization; if None, randomness is unconstrained.
+    Parameters:
+        failure_data_path (str): Path to the unit-level failure data CSV.
+        weather_data_path (str): Path to the per-state daily weather data CSV.
+        power_load_data_path (str): Path to the per-state daily power load data CSV.
+        feature_names (List[str]): Feature columns to retain from weather/power-load datasets.
+        initial_MC_state_filter (str): If not 'all', filters failure data to rows with this initial MC state.
+        technology_filter (List[str], optional): Filter to only keep specific technologies.
+        state_one_hot (bool): Whether to one-hot encode 'State'. If False, use numeric codes.
+        cyclic_features (List[str], optional): Calendar features (e.g., 'Month') to encode as sine/cosine.
+        standardize_load_per_state (bool): Reserved for future use (not applied in current code).
+        dropNA (bool): Whether to drop rows with any missing features after merging.
+        feature_na_drop_threshold (float): Threshold above which feature columns are dropped due to NaNs.
+        sort_by_date (bool): Reserved for future use (not applied in current code).
+        seed (int, optional): Random seed for deterministic operations (e.g., clustering).
 
-        OUTPUTS:
-            - merged_count_df (pd.DataFrame) : Final model table with columns [<features> + <target_columns> + 'Data_weight']; float64 by default. For 'Unit_Failure', rows are per unit; otherwise per (Date, State).
-            - feature_names (List[str]) : Final ordered list of feature columns present in merged_count_df (after one-hot/cyclic expansion and drops).
-            - target_columns (List[str]) : Names of target columns, e.g., ['C_0'] or ['C_0', ..., f'C_{K-1}'] when cause_code_n_clusters == K.
+    Returns:
+        merged_df (pd.DataFrame): Final processed dataset with all selected features and target(s).
+        final_feature_names (List[str]): List of usable feature columns after expansion/encoding.
+        target_columns (List[str]): List of target column names.
+        integer_encoding (Dict[str, Dict[str, int]]): Dictionary mapping original string labels to integer codes
+            for categorical columns (e.g., 'State', 'Technology', 'Final_gen_state').
     """
 
 
-    rng = np.random.default_rng(seed if seed is not None else None)
+    # rng = np.random.default_rng(seed if seed is not None else None)
 
     cyclic_features = list(cyclic_features or [])
-    feature_names = list(feature_names)  # defensive copy
+    feature_names = list([(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in feature_names])  # defensive copy
+
+    integer_encoding = {}
 
     # ---------- Load base tables ----------
     # failure data
-    failure_df = pd.read_csv(failure_path)
-    event_count_df = pd.read_csv(event_count_path, index_col=["EventStartDT", "State"], parse_dates=["EventStartDT"])
-    # Only rows with available units make sense
-    event_count_df = event_count_df[event_count_df["NumAvailUnits"] > 0].copy()
-    event_count_df["Frequency"] = event_count_df["NumFailingUnits"] / event_count_df["NumAvailUnits"]
+    failure_df = pd.read_csv(failure_data_path, parse_dates=["Datetime_UTC"])
+    failure_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in failure_df.columns]
+    if 'Geographical State' in failure_df.columns:
+        failure_df.rename(columns={'Geographical State': 'State'}, inplace=True)
+    if 'Count' in failure_df.columns:
+        failure_df.rename(columns={'Count': 'Data_weight'}, inplace=True)
+    failure_df['State'] = failure_df['State'].str.upper()
+
+    if technology_filter is not None:
+        failure_df = failure_df[failure_df['Technology'].isin(technology_filter)].copy()
+    
+    if initial_MC_state_filter != 'all':
+        failure_df = failure_df[failure_df['Initial_MC_state'] == initial_MC_state_filter].copy()
+    
+    
+
 
     # --  Weather data --
-    weather_df = pd.read_csv(weather_data_path, index_col=["Date", "State"], parse_dates=["Date"], usecols=lambda col: col not in ["Unnamed: 0"])
-    keep_weather_features = (set(feature_names) & set(weather_df.columns)) - {"Date", "State"} # keep requested features that exist in weather_df, excluding index names
+    weather_df = pd.read_csv(weather_data_path, index_col=["datetime", "state"], parse_dates=["datetime"], usecols=lambda col: col not in ["Unnamed: 0"])
+    weather_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in weather_df.columns]
+    # Ensure index level names and normalize state codes
+    if isinstance(weather_df.index, pd.MultiIndex) and len(weather_df.index.names) >= 2:
+        dt_vals = pd.to_datetime(weather_df.index.get_level_values(0))
+        st_vals = weather_df.index.get_level_values(1).astype(str).str.upper()
+        weather_df.index = pd.MultiIndex.from_arrays([dt_vals, st_vals], names=["Datetime_UTC", "State"])
+    weather_df = weather_df.reset_index()
+    dt = pd.to_datetime(weather_df['Datetime_UTC'])
+    if getattr(dt.dt, "tz", None) is None:
+        dt = dt.dt.tz_localize('UTC')
+    else:
+        dt = dt.dt.tz_convert('UTC')
+    weather_df['Datetime_UTC'] = dt
+    weather_df = weather_df.set_index(['Datetime_UTC', 'State'])
+    
+
+
+    keep_weather_features = (set(feature_names) & set(weather_df.columns)) - {"Datetime", "State"} # keep requested features that exist in weather_df, excluding index names
     weather_df = weather_df[list(sorted(keep_weather_features))].copy()
 
     # drop weather cols with too many NaNs
     na_frac = weather_df.isna().mean()
-    drop_cols = na_frac[na_frac > feature_na_drop_threshold].index.tolist()
+    drop_cols = list(set(na_frac[na_frac > feature_na_drop_threshold].index.tolist())-{"Heat_index", "Wind_chill"})
     if drop_cols:
         print(f"Dropping weather columns with >{np.around(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
         weather_df.drop(columns=drop_cols, inplace=True)
         feature_names = [f for f in feature_names if f not in drop_cols]
 
     # -- Power Load data --
-    power_load_df = pd.read_csv(power_data_path, index_col=["Date", "State"], parse_dates=["Date"], usecols=lambda col: col not in ["Unnamed: 0"])
+    power_load_df = pd.read_csv(power_load_data_path, index_col=["UTC time", "State"], parse_dates=["UTC time"], usecols=lambda col: col not in ["Unnamed: 0"])
+    power_load_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in power_load_df.columns]
+    # Ensure index level names and normalize state codes
+    if isinstance(power_load_df.index, pd.MultiIndex) and len(power_load_df.index.names) >= 2:
+        dt_vals = pd.to_datetime(power_load_df.index.get_level_values(0))
+        st_vals = power_load_df.index.get_level_values(1).astype(str).str.upper()
+        power_load_df.index = pd.MultiIndex.from_arrays([dt_vals, st_vals], names=["Datetime_UTC", "State"])
     keep_power_features = set(feature_names) & set(power_load_df.columns)
     power_load_df = power_load_df[list(sorted(keep_power_features))].copy()
 
@@ -155,254 +176,108 @@ def preprocess_data(
         feature_names = [f for f in feature_names if f not in drop_cols]
 
 
-    # ---------- Helpers ----------
-    def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure MultiIndex (Date, State) with normalized dtypes."""
-        if not isinstance(df.index, pd.MultiIndex) or df.index.names != ["Date", "State"]:
-            # Try to coerce from a 2-level index with any names
-            if isinstance(df.index, pd.MultiIndex) and len(df.index.names) == 2:
-                date_level = df.index.get_level_values(0)
-                state_level = df.index.get_level_values(1)
-            else:
-                raise ValueError("Expected a 2-level index for all inputs.")
-        else:
-            date_level = df.index.get_level_values("Date")
-            state_level = df.index.get_level_values("State")
-
-        date_level = pd.to_datetime(date_level).normalize() # Ensure that dtype is datetime64[ns] and time is 00:00:00 for everyday
-        # normalize states to uppercase strings for consistent joining
-        state_level = pd.Index(state_level.astype(str).str.upper(), name="State")
-        idx = pd.MultiIndex.from_arrays([date_level, state_level], names=["Date", "State"])
-        out = df.copy()
-        out.index = idx
-        return out
-
-    def mergeData(
-        dataFrames : List[pd.DataFrame],
-        how        : str  = "inner",
-        dropna     : bool = True,
-        ) -> pd.DataFrame:
-        """
-        Merges a list of dataframes into a single dataframe.
-        
-        INPUTS:
-        - dataFrames: List of dataframes to merge.
-        - dropna: If True, drops rows with NaN values after merging.
-        - how: Type of merge to perform (e.g., 'inner', 'outer', 'left', 'right').
-        OUTPUTS:
-        - Merged dataframe.
-        """
-        dfs = [(_normalize_index(df)) for df in dataFrames]
-        merged = dfs[0]
-        for df in dfs[1:]:
-            merged = merged.join(df, how=how)
-        if dropna:
-            merged = merged.dropna()
-        return merged.sort_index()
-
 
     #  ---------- Merge ----------
-    merged_count_df = mergeData([event_count_df, weather_df, power_load_df], how="inner", dropna=True)
+    merged_data = failure_df.join(weather_df, how='left', on=['Datetime_UTC', 'State'])
+    merged_data = merged_data.join(power_load_df, how='left', on=['Datetime_UTC', 'State'])
 
-    failure_idx_df = failure_df.set_index(["EventStartDT", "State"])[["CauseCode", "UnitID"]]
-    # Temporarily rename level so _normalize_index treats it as Date
-    failure_idx_df.index = failure_idx_df.index.set_names(["Date", "State"])
-    failure_merged_df = mergeData([failure_idx_df, weather_df, power_load_df], how="inner", dropna=True).drop_duplicates()
+    if dropNA:
+        features_dropna = list(set(merged_data.columns) - {"Heat_index", "Wind_chill"})  # These features are just not defined for some conditions, hence resulting in NaNs
+        merged_data.dropna(subset=features_dropna, inplace=True)
+
+    merged_data.reset_index(drop=True, inplace=True)
 
 
-    # ---------- State handling ----------
-    if "State" not in merged_count_df.columns and "State" in merged_count_df.index.names:
-        merged_count_df["State"] = merged_count_df.index.get_level_values("State")
-
-    if state_one_hot and not model_per_state:
-        merged_count_df = pd.get_dummies(merged_count_df, columns=["State"], drop_first=False, dtype=int)
+    if state_one_hot:
+        merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
         if "State" in feature_names:
             feature_names.remove("State")
-        feature_names += [c for c in merged_count_df.columns if c.startswith("State_")]
+        feature_names += [c for c in merged_data.columns if c.startswith("State_")]
     else:
         if "State" not in feature_names:
             feature_names.append("State")
-        if isinstance(merged_count_df.iloc[0]["State"], str) and not model_per_state:
-            cats = {s: i for i, s in enumerate(np.sort(merged_count_df["State"].unique()))}
-            merged_count_df["State"] = merged_count_df["State"].map(cats)
+        if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
+            cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
+            merged_data["State"] = merged_data["State"].map(cats)
+            integer_encoding["States"] = cats
+
+    # ------------ Technology encodding ------------
+    if "Technology" in merged_data.columns:
+        if "Technology" not in feature_names:
+            feature_names.append("Technology")
+        if isinstance(merged_data.iloc[0]["Technology"], str): # convert to categorical codes
+            cats = {s: i for i, s in enumerate(np.sort(merged_data["Technology"].unique()))}
+            merged_data["Technology"] = merged_data["Technology"].map(cats)
+            integer_encoding['Technologies'] = cats
+
 
 
     # ---------- Calendar features ----------
-    merged_count_df["Date"]   = pd.to_datetime(merged_count_df.index.get_level_values("Date"),   errors="raise")
-    failure_merged_df["Date"] = pd.to_datetime(failure_merged_df.index.get_level_values("Date"), errors="raise")
 
     if "Season" in feature_names:
         def get_season(ts: pd.Timestamp) -> float:
             Y = ts.year
             seasons = {
-                0.0: (pd.Timestamp(f"{Y}-03-20"), pd.Timestamp(f"{Y}-06-20")),  # Spring
-                1.0: (pd.Timestamp(f"{Y}-06-21"), pd.Timestamp(f"{Y}-09-22")),  # Summer
-                2.0: (pd.Timestamp(f"{Y}-09-23"), pd.Timestamp(f"{Y}-12-20")),  # Autumn
-                3.0: (pd.Timestamp(f"{Y}-12-21"), pd.Timestamp(f"{Y+1}-03-19")),  # Winter
+                0.0: (pd.Timestamp(f"{Y}-03-20", tz="UTC"), pd.Timestamp(f"{Y}-06-20", tz="UTC")),  # Spring
+                1.0: (pd.Timestamp(f"{Y}-06-21", tz="UTC"), pd.Timestamp(f"{Y}-09-22", tz="UTC")),  # Summer
+                2.0: (pd.Timestamp(f"{Y}-09-23", tz="UTC"), pd.Timestamp(f"{Y}-12-20", tz="UTC")),  # Autumn
+                3.0: (pd.Timestamp(f"{Y}-12-21", tz="UTC"), pd.Timestamp(f"{Y+1}-03-19", tz="UTC")),  # Winter
             }
             for s, (start, end) in seasons.items():
                 if start <= ts <= end:
                     return s
             return 3.0  # Jan–Mar before Mar 20
-        merged_count_df["Season"]   = merged_count_df["Date"].apply(get_season)
-        failure_merged_df["Season"] = failure_merged_df["Date"].apply(get_season)
-
+        merged_data["Season"]   = merged_data["Datetime_UTC"].apply(get_season)
     if "Month" in feature_names:
-        merged_count_df["Month"]   = merged_count_df["Date"].dt.month
-        failure_merged_df["Month"] = failure_merged_df["Date"].dt.month
+        merged_data["Month"]   = merged_data["Datetime_UTC"].dt.month
     if "DayOfWeek" in feature_names:
-        merged_count_df["DayOfWeek"]   = merged_count_df["Date"].dt.dayofweek
-        failure_merged_df["DayOfWeek"] = failure_merged_df["Date"].dt.dayofweek
+        merged_data["DayOfWeek"]   = merged_data["Datetime_UTC"].dt.dayofweek
     if "DayOfYear" in feature_names:
-        merged_count_df["DayOfYear"]   = merged_count_df["Date"].dt.dayofyear
-        failure_merged_df["DayOfYear"] = failure_merged_df["Date"].dt.dayofyear
+        merged_data["DayOfYear"]   = merged_data["Datetime_UTC"].dt.dayofyear
     if "Holiday" in feature_names:
         cal = USFederalHolidayCalendar()
-        holidays = cal.holidays(start=merged_count_df["Date"].min(), end=merged_count_df["Date"].max())
-        merged_count_df["Holiday"]   = merged_count_df["Date"].isin(holidays)
-        failure_merged_df["Holiday"] = failure_merged_df["Date"].isin(holidays)
+        holidays = cal.holidays(start=merged_data["Datetime_UTC"].min(), end=merged_data["Datetime_UTC"].max())
+        merged_data["Holiday"]   = merged_data["Datetime_UTC"].isin(holidays)
     if "Weekend" in feature_names:
-        merged_count_df["Weekend"]   = merged_count_df["Date"].dt.weekday >= 5
-        failure_merged_df["Weekend"] = failure_merged_df["Date"].dt.weekday >= 5
+        merged_data["Weekend"]   = merged_data["Datetime_UTC"].dt.weekday >= 5
 
 
-    
-    # ---------- Cause-code clustering & targets ----------
-    def kMeans_causeCodes(
-        events_df: pd.DataFrame,
-        n_clusters: int,
-        features_names: Sequence[str],
-        max_iter: int = 300,
-        ) -> dict:
-        """Cluster CauseCode by mean feature vectors."""
+    # ---------- Target construction ----------
+    target_columns = ['Final_gen_state']
+    if isinstance(merged_data.iloc[0]["Final_gen_state"], str): # convert to categorical codes
+        cats = {s: i for i, s in enumerate(np.sort(merged_data["Final_gen_state"].unique()))}
+        merged_data["Final_gen_state"] = merged_data["Final_gen_state"].map(cats)
+        integer_encoding['Final_gen_state'] = cats
 
-        use_feats = [f for f in features_names if f not in {"Date", "State"} and not f.startswith("State_")]
-        tmp = events_df[["CauseCode"] + use_feats].dropna().copy()
-        grouped = tmp.groupby("CauseCode")[use_feats].mean()
-        if grouped.empty:
-            return {}
-        X = StandardScaler().fit_transform(grouped)
-        km = KMeans(n_clusters=n_clusters, max_iter=max_iter, random_state=42, n_init="auto")
-        labels = km.fit_predict(X)
-        return {cc: int(c) for cc, c in zip(grouped.index, labels)}
-
-
-    if cause_code_n_clusters > 1:
-        cc2clu = kMeans_causeCodes(failure_merged_df, cause_code_n_clusters, feature_names)
-        failure_merged_df["CauseCluster"] = failure_merged_df["CauseCode"].map(cc2clu)
-
-        # counts per (Date, State, cluster)
-        counts = (
-            failure_merged_df
-            .groupby([failure_merged_df.index, "CauseCluster"])
-            .size()
-            .unstack("CauseCluster", fill_value=0)
-        )
-        # ensure all cluster columns exist
-        for c in range(cause_code_n_clusters):
-            if c not in counts.columns:
-                counts[c] = 0
-        counts = counts.reindex(sorted(counts.columns), axis=1)
-
-        # align to main frame, fill missing with 0
-        counts = counts.reindex(merged_count_df.index, fill_value=0)
-
-        for c in range(cause_code_n_clusters):
-            merged_count_df[f"C_{c}"] = counts[c].astype(np.int64)
-
-        merged_count_df["NumFailingUnits"] = counts.sum(axis=1)
-        if target == "Frequency":
-            merged_count_df[[f"C_{c}" for c in range(cause_code_n_clusters)]] = (
-                merged_count_df[[f"C_{c}" for c in range(cause_code_n_clusters)]] \
-                .div(merged_count_df["NumAvailUnits"], axis=0)
-                .clip(lower=0, upper=1)
-            )
-    else:
-        # Single class: any failure
-        merged_count_df["C_0"] = merged_count_df["NumFailingUnits"]
-        if target == "Frequency":
-            merged_count_df["C_0"] = (merged_count_df["C_0"] / merged_count_df["NumAvailUnits"]).clip(0, 1)
-
-    target_columns = [f"C_{i}" for i in range(cause_code_n_clusters)]
-
-    # Ensure consistent global frequency
-    merged_count_df["Frequency"] = (
-        merged_count_df["NumFailingUnits"] / merged_count_df["NumAvailUnits"]
-    ).clip(0, 1)
-
-    # ---------- Final NA handling ----------
-    if dropNA:
-        merged_count_df = merged_count_df.dropna()
 
 
     # ---------- Cyclic feature encoding ----------
     for feat in list(cyclic_features):
-        if feat not in merged_count_df.columns:
+        if feat not in merged_data.columns:
             # skip quietly if not present
             continue
-        series = merged_count_df[feat]
+        series = merged_data[feat]
         min_val, max_val = series.min(), series.max()
         if pd.isna(min_val) or pd.isna(max_val) or max_val == min_val:
             # degenerate: encode as 0/1 constant vectors
-            merged_count_df[f"{feat}_sin"] = 0.0
-            merged_count_df[f"{feat}_cos"] = 1.0
+            merged_data[f"{feat}_sin"] = 0.0
+            merged_data[f"{feat}_cos"] = 1.0
         else:
             phase = 2.0 * np.pi * (series - min_val) / (max_val - min_val)
-            merged_count_df[f"{feat}_sin"] = np.sin(phase)
-            merged_count_df[f"{feat}_cos"] = np.cos(phase)
+            merged_data[f"{feat}_sin"] = np.sin(phase)
+            merged_data[f"{feat}_cos"] = np.cos(phase)
         if feat in feature_names:
             feature_names.remove(feat)
         feature_names += [f"{feat}_sin", f"{feat}_cos"]
-        merged_count_df.drop(columns=[feat], inplace=True, errors="ignore")
+        merged_data.drop(columns=[feat], inplace=True, errors="ignore")
 
-
-    # ---------- Unit expansion vs. frequency weighting ----------
-    if target == "Unit_Failure":
-        # Expand to per-unit rows with one-hot cluster targets
-        n_avail = merged_count_df["NumAvailUnits"].to_numpy(dtype=np.int64)
-        fail_mat = merged_count_df[target_columns].fillna(0).to_numpy(dtype=np.int64)
-        n_rows, n_clusters = fail_mat.shape
-        assert np.all(n_avail >= fail_mat.sum(axis=1)), "NumAvailUnits must be >= sum of failures for each (Date, State)."
-
-        total_units = int(n_avail.sum())
-        # X_base = merged_count_df[feature_names].to_numpy()
-        X_base = merged_count_df.to_numpy()
-        X_rep = np.repeat(X_base, n_avail, axis=0)
-
-        Y = np.zeros((total_units, n_clusters), dtype=np.int8)
-        offsets = np.concatenate(([0], np.cumsum(n_avail)))
-        for i in range(n_rows):
-            pos = offsets[i]
-            for k, cnt in enumerate(fail_mat[i]):
-                if cnt:
-                    Y[pos:pos+cnt, k] = 1
-                    pos += cnt
-
-        # merged_count_df = pd.DataFrame(X_rep, columns=feature_names)
-        merged_count_df = pd.DataFrame(X_rep, columns=merged_count_df.columns)
-        for k, col in enumerate(target_columns):
-            merged_count_df[col] = Y[:, k]
-        merged_count_df["Data_weight"] = 1.0
-    elif target == "Frequency":
-        merged_count_df["Data_weight"] = merged_count_df["NumAvailUnits"].astype(float)
-
-    # ---------- Shuffle (optional) ----------
-    if randomize:
-        merged_count_df = merged_count_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-
-    # ---------- Sort by date (optional) ----------
-    if sort_by_date:
-        if 'Date' in merged_count_df.columns and 'Date' in merged_count_df.index.names:
-            merged_count_df = merged_count_df.drop(columns=['Date'])   
-        merged_count_df = merged_count_df.sort_values(by=["Date"] + (["State"] if "State" in merged_count_df.columns else []))
-        merged_count_df = merged_count_df.reset_index(drop=True)
 
     # ---------- Final column selection ----------
-    cols = [c for c in feature_names if c in merged_count_df.columns] + target_columns + ["Data_weight"]
-    merged_count_df = merged_count_df[cols].copy()
+    cols = [c for c in feature_names if c in merged_data.columns] + target_columns + ["Data_weight"]
+    merged_data = merged_data[cols].copy()
 
     # Use float64 consistently (most ML libs fine with float32 if you prefer)
-    return merged_count_df.astype(np.float64), feature_names, target_columns
+    return merged_data.astype(np.float64), feature_names, target_columns, integer_encoding
 
 
 
