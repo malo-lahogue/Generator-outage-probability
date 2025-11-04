@@ -8,17 +8,16 @@ import itertools
 import json
 import math
 import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MKL_SERVICE_FORCE_INTEL", "1")
 import pickle
 import warnings
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-# Robust UTC for all Python versions (3.11+: _dt.UTC, older: _dt.timezone.utc)
-# try:
-#     UTC = datetime.UTC            # Python 3.11+
-# except AttributeError:
-#     UTC = datetime.timezone.utc   # Older versions
 
 # ── Third-Party ────────────────────────────────────────────────────────────────
 import numpy as np
@@ -27,13 +26,23 @@ import matplotlib.pyplot as plt
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from tqdm import tqdm
 
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import xgboost as xgb
-
+# 1) PyTorch first
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
+torch.set_num_threads(1)
+
+# 2) Then numpy/pandas/sklearn
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+# 3) Finally xgboost and the rest
+import xgboost as xgb
+
+
 
 
 
@@ -58,10 +67,9 @@ def preprocess_data(
     technology_filter: List[str] = None,
     state_one_hot: bool = True,
     cyclic_features: List[str] = None,
-    standardize_load_per_state: bool = True,
     dropNA: bool = True,
     feature_na_drop_threshold: float = 0.2,
-    sort_by_date: bool = True,
+    test_periods: List[Tuple[pd.Timestamp, pd.Timestamp]] = None,
     seed: Optional[int] = 42,
 ) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, int]]]:
     """
@@ -86,7 +94,6 @@ def preprocess_data(
         technology_filter (List[str], optional): Filter to only keep specific technologies.
         state_one_hot (bool): Whether to one-hot encode 'State'. If False, use numeric codes.
         cyclic_features (List[str], optional): Calendar features (e.g., 'Month') to encode as sine/cosine.
-        standardize_load_per_state (bool): Reserved for future use (not applied in current code).
         dropNA (bool): Whether to drop rows with any missing features after merging.
         feature_na_drop_threshold (float): Threshold above which feature columns are dropped due to NaNs.
         sort_by_date (bool): Reserved for future use (not applied in current code).
@@ -122,9 +129,9 @@ def preprocess_data(
         failure_df = failure_df[failure_df['Technology'].isin(technology_filter)].copy()
     
     if initial_MC_state_filter != 'all':
-        failure_df = failure_df[failure_df['Initial_MC_state'] == initial_MC_state_filter].copy()
+        failure_df = failure_df.loc[failure_df['Initial_gen_state'] == initial_MC_state_filter].copy()
     
-    
+
 
 
     # --  Weather data --
@@ -156,6 +163,12 @@ def preprocess_data(
         print(f"Dropping weather columns with >{np.around(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
         weather_df.drop(columns=drop_cols, inplace=True)
         feature_names = [f for f in feature_names if f not in drop_cols]
+    # Keep heat index and wind chill even if they NaNs, as they are not defined for all conditions
+    for col in ["Heat_index", "Wind_chill"]:
+        if col in weather_df.columns and col in feature_names:
+            weather_df[col + "_isnan"] = weather_df[col].isna().astype(np.float32) # add isnan indicator
+            feature_names.append(col + "_isnan")
+            weather_df[col] = weather_df[col].fillna(0.0)  # fill NaNs with 0.0 for avoiding issues later
 
     # -- Power Load data --
     power_load_df = pd.read_csv(power_load_data_path, index_col=["UTC time", "State"], parse_dates=["UTC time"], usecols=lambda col: col not in ["Unnamed: 0"])
@@ -171,7 +184,7 @@ def preprocess_data(
     na_frac = power_load_df.isna().mean()
     drop_cols = na_frac[na_frac > feature_na_drop_threshold].index.tolist()
     if drop_cols:
-        print(f"Dropping power load columns with >{np.araound(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
+        print(f"Dropping power load columns with >{np.around(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
         power_load_df.drop(columns=drop_cols, inplace=True)
         feature_names = [f for f in feature_names if f not in drop_cols]
 
@@ -182,8 +195,7 @@ def preprocess_data(
     merged_data = merged_data.join(power_load_df, how='left', on=['Datetime_UTC', 'State'])
 
     if dropNA:
-        features_dropna = list(set(merged_data.columns) - {"Heat_index", "Wind_chill"})  # These features are just not defined for some conditions, hence resulting in NaNs
-        merged_data.dropna(subset=features_dropna, inplace=True)
+        merged_data.dropna(inplace=True)
 
     merged_data.reset_index(drop=True, inplace=True)
 
@@ -273,12 +285,52 @@ def preprocess_data(
 
 
     # ---------- Final column selection ----------
-    cols = [c for c in feature_names if c in merged_data.columns] + target_columns + ["Data_weight"]
-    merged_data = merged_data[cols].copy()
+    feature_names = list(set(feature_names).intersection(merged_data.columns))
+    cols = feature_names + target_columns + ["Data_weight"]
 
-    # Use float64 consistently (most ML libs fine with float32 if you prefer)
-    return merged_data.astype(np.float64), feature_names, target_columns, integer_encoding
+    for col in cols:
+        if col not in merged_data.columns:
+            raise KeyError(f"Expected column '{col}' not found in merged data.")
 
+    # --- ensure target columns are integer-encoded ---
+    for tcol in target_columns:
+        merged_data[tcol] = merged_data[tcol].astype(np.int32)
+
+    # Use float64 consistently for features (you can switch to float32 if desired)
+    for fcol in feature_names:
+        merged_data[fcol] = merged_data[fcol].astype(np.float32)
+
+    merged_data["Data_weight"] = merged_data["Data_weight"].astype(np.float64)
+
+    merged_df = merged_data.sort_values(by="Datetime_UTC").reset_index(drop=True)
+
+    # ---------- Separate test dataset ----------
+    if test_periods:
+        mask_test = pd.Series(False, index=merged_data.index)
+        for start_date, end_date in test_periods:
+            sd = pd.to_datetime(start_date)
+            ed = pd.to_datetime(end_date)
+            # ensure end-of-day (set to 23:59:59.999999 of the given date)
+            ed = ed.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+
+            # make timestamps timezone-aware (match merged_data which uses UTC)
+            if sd.tzinfo is None:
+                sd = sd.tz_localize('UTC')
+            if ed.tzinfo is None:
+                ed = ed.tz_localize('UTC')
+            mask = (merged_data['Datetime_UTC'] >= sd) & (merged_data['Datetime_UTC'] <= ed)
+            mask_test |= mask
+        test_df = merged_data.loc[mask_test].copy().reset_index(drop=True)
+        train_val_df = merged_data.loc[~mask_test].copy().reset_index(drop=True)
+    else:
+        # no test periods specified -> empty test set, all data for train/val
+        test_df = merged_data.iloc[0:0].copy().reset_index(drop=True)
+        train_val_df = merged_data.copy().reset_index(drop=True)
+    
+    test_df = test_df[cols].copy()
+    train_val_df = train_val_df[cols].copy()
+    return train_val_df, test_df, feature_names, target_columns, integer_encoding
+    # return merged_df, feature_names, target_columns, integer_encoding
 
 
 
@@ -302,7 +354,7 @@ class OptSurrogateDataset(Dataset):
         (x, y, w) where x and y are float32 tensors, and w is a float32 scalar weight.
     """
 
-    def __init__(self, df: pd.DataFrame, feature_cols: list, target_cols: list):
+    def __init__(self, df: pd.DataFrame, feature_cols: list, target_cols: list) -> None:
         if not isinstance(df, pd.DataFrame):
             raise TypeError("df must be a pandas DataFrame.")
         if not feature_cols or not target_cols:
@@ -336,7 +388,7 @@ class OptSurrogateDataset(Dataset):
         # ---------- build y ----------
         if isinstance(target_cols[0], (list, tuple)):
             seq_len = len(target_cols)
-            out_size = len(target_cols[0])
+            out_size = len(target_cols[0]) * (self.num_classes if self.num_classes else 1)
             if any(len(cols_t) != out_size for cols_t in target_cols):
                 raise ValueError("All timesteps in target_cols must have the same length.")
             for cols_t in target_cols:
@@ -344,14 +396,14 @@ class OptSurrogateDataset(Dataset):
                 if missing:
                     raise KeyError(f"Missing target columns at some timestep: {missing}")
 
-            Y = np.empty((len(self.data), seq_len, out_size), dtype=np.float32)
+            Y = np.empty((len(self.data), seq_len, out_size), dtype=np.int64)
             for t, cols_t in enumerate(target_cols):
-                Y[:, t, :] = self.data[cols_t].to_numpy(dtype=np.float32)
+                Y[:, t, :] = self.data[cols_t].to_numpy(dtype=np.int64)
         else:
             missing = [c for c in target_cols if c not in self.data.columns]
             if missing:
                 raise KeyError(f"Missing target columns: {missing}")
-            Y = self.data[target_cols].to_numpy(dtype=np.float32)
+            Y = self.data[target_cols].to_numpy(dtype=np.int64).flatten()
         self.y = Y
 
         # ---------- optional weights ----------
@@ -366,7 +418,12 @@ class OptSurrogateDataset(Dataset):
 
     def __getitem__(self, idx: int):
         x = torch.as_tensor(self.X[idx], dtype=torch.float32)
-        y = torch.as_tensor(self.y[idx], dtype=torch.float32)
+        y_np = self.y[idx]
+        if isinstance(y_np, np.ndarray):
+            y_np = np.squeeze(y_np)
+            if y_np.ndim != 0:
+                raise ValueError(f"Cross-entropy expects a single class index per sample; got shape {y_np.shape}")
+        y = torch.as_tensor(int(y_np), dtype=torch.int64)  # scalar
         w = torch.as_tensor(self.train_weights[idx], dtype=torch.float32)
         return x, y, w
 
@@ -400,7 +457,6 @@ class GeneratorFailureProbabilityInference:
         data: pd.DataFrame,
         train_ratio: float = 0.8,
         val_ratio: float = 0.2,
-        test_ratio: float = 0.0,
         standardize: Union[bool, list[str]] = False,
         model_per_state: bool = False,
         ) -> None:
@@ -417,7 +473,6 @@ class GeneratorFailureProbabilityInference:
             - data (pd.DataFrame) : Full dataset containing features/targets (+ optional 'Data_weight').
             - train_ratio (float) : Fraction for training set.
             - val_ratio (float) : Fraction for validation set.
-            - test_ratio (float) : Fraction for held-out test set (from the tail).
             - standardize (bool | list[str]) : Whether/which columns to standardize.
             - linear_transform_m_p (tuple[float,float]) : Placeholder affine transform for targets (not implemented).
             - model_per_state (bool) : If True, intended per-state training (not implemented here).
@@ -441,21 +496,18 @@ class GeneratorFailureProbabilityInference:
 
         if any(r < 0 for r in (train_ratio, val_ratio, test_ratio)):
             raise ValueError("train_ratio, val_ratio, and test_ratio must be non-negative.")
-        if train_ratio + val_ratio + test_ratio > 1.0 + 1e-9:
+        if train_ratio + val_ratio  > 1.0 + 1e-9:
             raise ValueError("train_ratio + val_ratio + test_ratio must be ≤ 1.0.")
 
         self.dataset_df = data.copy()
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
         self.standardize = standardize
         self.model_per_state = model_per_state
 
         # ---- split (tail = test) ----
         N = len(self.dataset_df)
-        test_size = int(round(N * test_ratio))
-        ds = self.dataset_df.iloc[: N - test_size] if test_size > 0 else self.dataset_df
-        self.test_data = self.dataset_df.iloc[N - test_size :] if test_size > 0 else None
+        ds = self.dataset_df
 
         # Now allocate train/val on the remaining ds (exact partition to avoid random_split length mismatch)
         ds_len = len(ds)
@@ -1048,6 +1100,7 @@ class MLP(GeneratorFailureProbabilityInference):
             'relu': nn.ReLU,
             'sigmoid': nn.Sigmoid,
             'tanh': nn.Tanh,
+            'softmax': nn.Softmax,
         }
         self.pytorch_optimizers = {
             'adam': torch.optim.Adam,
@@ -1059,6 +1112,7 @@ class MLP(GeneratorFailureProbabilityInference):
         self,
         feature_cols: list[str],
         target_cols: list[str],
+        num_classes: int,
         hidden_sizes: Tuple[int, ...],
         activations: Tuple[str, ...],
         out_act_fn: Optional[str] = None,
@@ -1078,11 +1132,12 @@ class MLP(GeneratorFailureProbabilityInference):
         """
         self.feature_cols = feature_cols
         self.target_cols = target_cols
+        self.num_classes = num_classes
         self.hidden_sizes = hidden_sizes
         self.activations = activations
 
         in_dim = len(self.feature_cols)
-        out_dim = len(self.target_cols)
+        out_dim = len(self.target_cols)*num_classes
 
         if len(hidden_sizes) != len(activations):
             raise ValueError("hidden_sizes and activations must have the same length.")
@@ -1171,6 +1226,7 @@ class MLP(GeneratorFailureProbabilityInference):
             OUTPUTS:
             - None
         """
+        print("Starting MLP training...")
         # --- regularization schedule ---
         if regularization_type is not None and not (
             (isinstance(lambda_reg, (float, int)) and float(lambda_reg) > 0.0)
@@ -1192,12 +1248,10 @@ class MLP(GeneratorFailureProbabilityInference):
         self.loss_fn_name = loss
         self.model.to(device)
         self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-
         train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(self.val_data,   batch_size=batch_size, shuffle=False)
-
-        optim = self.pytorch_optimizers[optimizer](self.model.parameters(), lr=lr)
         loss_fn = self._make_loss(loss, weighted=weights_data)
+        optim = self.pytorch_optimizers[optimizer](self.model.parameters(), lr=lr)
 
         # --- LR scheduler (optional) ---
         scheduler = None
@@ -1247,6 +1301,13 @@ class MLP(GeneratorFailureProbabilityInference):
 
                     xb = xb.to(device)
                     yb = yb.to(device)
+
+                    # Targets: [B] long
+                    if yb.ndim != 1:
+                        yb = yb.view(-1)
+                    yb = yb.long()
+
+
                     yhat = self.model(xb)
                     elem = loss_fn(yhat, yb)                # elementwise loss
                     loss_val = _reduce_elemwise_loss(elem, wb)
@@ -1771,8 +1832,9 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         num_boost_round: int = 100,
         feature_cols: Optional[list[str]] = None,
         target_cols: Optional[list[str]] = None,
-        eval_metric: str = 'rmse',
-        objective: str = 'reg:logistic',
+        num_classes: int = 3,
+        eval_metric: str = 'mlogloss',
+        objective: str = 'multi:softprob',
         early_stopping_rounds: int = 10,
         subsample: float = 1.0,
         device: str = 'cpu',
@@ -1799,6 +1861,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         """
         self.feature_cols = feature_cols or []
         self.target_cols = target_cols or []
+        self.num_classes = num_classes
         self.max_depth = max_depth
         self.eta = eta
         self.gamma = gamma
@@ -1810,7 +1873,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         self.subsample = subsample
         self.device = device
 
-        self.model = xgb.XGBRegressor(
+        self.model = xgb.XGBClassifier(
             max_depth=max_depth,
             eta=eta,
             gamma=gamma,
@@ -1820,6 +1883,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             eval_metric=eval_metric,
             objective=objective,
             early_stopping_rounds=early_stopping_rounds,
+            num_class=num_classes,
             verbosity=1 if self.verbose else 0,
             device=device,
         )
@@ -1929,7 +1993,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             stand_targets = []
 
         X_np = X_df[self.feature_cols].to_numpy(dtype=np.float32)
-        y_pred = self.model.predict(X_np)
+        y_pred = self.model.predict_proba(X_np)
 
         # ensure 2D
         if y_pred.ndim == 1:
