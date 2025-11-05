@@ -326,7 +326,7 @@ def preprocess_data(
         # no test periods specified -> empty test set, all data for train/val
         test_df = merged_data.iloc[0:0].copy().reset_index(drop=True)
         train_val_df = merged_data.copy().reset_index(drop=True)
-    
+    cols = ['Datetime_UTC']+cols
     test_df = test_df[cols].copy()
     train_val_df = train_val_df[cols].copy()
     return train_val_df, test_df, feature_names, target_columns, integer_encoding
@@ -2295,8 +2295,24 @@ def _val_loss_numpy(
             bce = -(y_true * np.log(p) + (1.0 - y_true) * np.log(1.0 - p))  # (N, T)
             per_sample = bce.mean(axis=1)
             return _weighted_mean(per_sample, w)
+        elif m == "cross_entropy":
+            eps = 1e-9
+            p = np.clip(y_pred, eps, 1.0 - eps)
+            # If y_true is one-hot, convert to class indices
+            if y_true.ndim == 2 and y_true.shape[1] > 1:
+                y_idx = y_true.argmax(axis=1)
+            else:
+                y_idx = y_true.astype(int).flatten()
+
+            # Gather predicted probability for the correct class
+            n = p.shape[0]
+            p_true = p[np.arange(n), y_idx]
+
+            per_sample = -np.log(p_true)
+            return _weighted_mean(per_sample, w)
+            
         else:
-            raise ValueError("metric must be 'mse', 'mae', or 'logloss'")
+            raise ValueError("metric must be 'mse', 'mae', 'logloss' or 'cross_entropy'.")
 
     # ---- Path 1: pandas DataFrame (e.g., XGBoost wrapper) ----
     if hasattr(model, "val_data") and isinstance(model.val_data, pd.DataFrame):
