@@ -163,19 +163,19 @@ def main() -> None:
 
     elif "mlp" in args.models:
         # build_params = {"activations": ["relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu"], "feature_cols": ["CDD", "CDD_7d", "ExtremeCold", "ExtremeHeat", "ExtremeWind", "FDD", "FDD_7d", "HDD", "HDD_7d", "Holiday", "PAVG", "PDMAX", "PMAX", "PMIN", "PRCP", "PRCP_30d_sum", "SNOW", "SNWD", "SnowSeverity", "TAVG", "TMAX", "TMIN", "Weekend", "State_ALABAMA", "State_ALBERTA", "State_ARIZONA", "State_ARKANSAS", "State_BRITISH COLUMBIA", "State_CALIFORNIA", "State_COLORADO", "State_FLORIDA", "State_GEORGIA", "State_IDAHO", "State_INDIANA", "State_IOWA", "State_KANSAS", "State_KENTUCKY", "State_LOUISIANA", "State_MAINE", "State_MARYLAND", "State_MASSACHUSETTS", "State_MICHIGAN", "State_MINNESOTA", "State_MISSISSIPPI", "State_MISSOURI", "State_MONTANA", "State_NEBRASKA", "State_NEVADA", "State_NEW BRUNSWICK", "State_NEW HAMPSHIRE", "State_NEW JERSEY", "State_NEW MEXICO", "State_NEW YORK", "State_NORTH CAROLINA", "State_NORTH DAKOTA", "State_OHIO", "State_OKLAHOMA", "State_ONTARIO", "State_OREGON", "State_PENNSYLVANIA", "State_SOUTH CAROLINA", "State_SOUTH DAKOTA", "State_TENNESSEE", "State_TEXAS", "State_UTAH", "State_VIRGINIA", "State_WASHINGTON", "State_WEST VIRGINIA", "State_WISCONSIN", "State_WYOMING", "Season_sin", "Season_cos", "Month_sin", "Month_cos", "DayOfWeek_sin", "DayOfWeek_cos", "DayOfYear_sin", "DayOfYear_cos"], "hidden_sizes": [256, 256, 128, 64, 32, 16, 8, 4], "out_act_fn": "sigmoid", "target_cols": ["C_0"]}
-        train_params = {"batch_size": 128, "burn_in": 150, "device": "cuda", "early_stopping": True, "epochs": 250, "flat_delta": 0.0001, "flat_mode": "iqr", "flat_patience": 50, "grad_clip_norm": 1.0, "lambda_reg": 5e-05, "loss": "logloss", "lr": 0.0004, "lr_scheduler": "plateau", "min_delta": 5e-05, "optimizer": "adam", "patience": 50, "regularization_type": "L2", "rel_flat": 0.002, "weights_data": True}
 
 
         mlp_model = im.MLP(verbose=False)
         mlp_model.build_model(feature_cols=feature_names,
                             target_cols=target_columns,
+                            num_classes=3,
                             hidden_sizes=(100, 50),
-                            activations=('relu', 'relu'),
-                            out_act_fn='sigmoid')
+                            activations=('relu', 'relu'))
         mlp_model.build_model(**build_params)
 
         mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols)
-        mlp_model.train_model(optimizer='adam', loss='cross_entropy',
+        mlp_model.train_model(optimizer='adam', 
+                              loss='cross_entropy',
                                 regularization_type='L2', lambda_reg=1e-3,
                                 weights_data=True,
                                 epochs=10, batch_size=10, lr=2e-4,

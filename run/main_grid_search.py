@@ -30,18 +30,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Data paths
-    p.add_argument("--failures",  type=Path, default=THIS_DIR / "../DATA/filtered_events.csv")
-    p.add_argument("--events",    type=Path, default=THIS_DIR / "../DATA/event_count.csv")
-    p.add_argument("--weather",   type=Path, default=THIS_DIR / "../DATA/weather_data_per_state_all.csv")
-    p.add_argument("--powerload", type=Path, default=THIS_DIR / "../DATA/power_load_input.csv")
+    p.add_argument("--failures",  type=Path, default=THIS_DIR / "../DATA/hourly/hourly_failure_dataset_compressed.csv")
+    p.add_argument("--weather",   type=Path, default=THIS_DIR / "../DATA/hourly/hourly_weather_by_state.csv")
+    p.add_argument("--powerload", type=Path, default=THIS_DIR / "../DATA/hourly/hourly_load_by_state.csv")
 
     # Problem params
-    p.add_argument("--target",   type=str, choices=["Unit_Failure", "Frequency"], default="Frequency",
-                   help='Prediction target. "Unit_Failure" = unit-level labels, "Frequency" = daily-state aggregate.')
-    p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
+    p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
+    p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state_XGB.csv")
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state")# .csv added later
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
@@ -64,21 +62,17 @@ def ensure_inputs_exist(*paths: Path) -> None:
         raise FileNotFoundError("Missing required input file(s):\n  " + "\n  ".join(missing))
 
 def load_feature_bases(weather_path: Path, powerload_path: Path) -> list[str]:
-    weather = pd.read_csv(
-        weather_path, index_col=["Date", "State"], parse_dates=["Date"],
-        usecols=lambda c: c not in ["Unnamed: 0"]
-    )
-    power = pd.read_csv(
-        powerload_path, index_col=["Date", "State"], parse_dates=["Date"],
-        usecols=lambda c: c not in ["Unnamed: 0"]
-    )
-    base = list(weather.columns) + list(power.columns) + ["Season", "Month", "DayOfWeek", "DayOfYear", "Holiday", "Weekend"]
+    weather = pd.read_csv(weather_path, parse_dates=["datetime"])
+    power =  pd.read_csv(powerload_path, parse_dates=["UTC time"])
+    base = list(weather.columns) + list(power.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend', 'Technology']
+
     # Remove duplicates but keep stable order
     seen = set()
     base = [c for c in base if not (c in seen or seen.add(c))]
     # Drop known non-features if present
-    drop = {"EventStartDT", "Date", "PRCP_30dz"}
+    drop = {'datetime', 'UTC time', 'Datetime_UTC', 'Datetime'}
     feats = [c for c in base if c not in drop]
+    feats = list(set([(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in feats]))
     feats.sort()
     return feats
 
@@ -89,32 +83,52 @@ def main() -> None:
     np.random.seed(args.seed)   # Reproducibility
 
     # I/O prep
-    ensure_inputs_exist(args.failures, args.events, args.weather, args.powerload)
-    args.result_csv.parent.mkdir(parents=True, exist_ok=True)
+    ensure_inputs_exist(args.failures, args.weather, args.powerload)
+    print(f"Computing transition probabilities starting from state {args.initial_state} for {args.technologies} generators.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
     print(f"{len(feature_names)} initial features: {feature_names}")
 
-    # ---------- Merge + label prep ----------
-    data_df, feature_cols, target_cols = im.preprocess_data(
-        failure_path=args.failures,
-        event_count_path=args.events,
-        weather_data_path=args.weather,
-        power_data_path=args.powerload,
-        feature_names=feature_names,
-        randomize=False,
-        target=args.target,
-        state_one_hot=True,
-        cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
-        cause_code_n_clusters=args.clusters,
-        feature_na_drop_threshold=0.10,
-        sort_by_date=True,
-    )
+    technologies = {'nuclear': ['Nuclear'],
+                    'hydro': ['Pumped Storage/Hydro'],
+                    'geothermal': ['Geothermal'],
+                    'thermal': ['CC GT units ', 
+                                'CC steam units', 
+                                'Co-generator Block ', 
+                                'CoG GT units', 
+                                'CoG steam units ', 
+                                'Combined Cycle Block', 
+                                'Fluidized Bed', 'Fossil-Steam', 
+                                'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
+                                'Gas Turbine/Jet Engine with HSRG', 
+                                'Internal Combustion/Reciprocating Engines',
+                                'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
+    if technologies is None:
+        raise ValueError(f"Unknown technology group: {args.technologies}. Choose from 'nuclear', 'hydro', 'geothermal', or 'thermal'.")
+    
+    test_periods = [(pd.Timestamp('2022-01-01'), pd.Timestamp('2023-12-31'))]
 
+    # ---------- Merge + label prep ----------
+    train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
+                                                                                weather_data_path=args.weather,
+                                                                                power_load_data_path=args.powerload,
+                                                                                feature_names=feature_names,
+                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
+                                                                                state_one_hot=True,
+                                                                                initial_MC_state_filter=args.initial_state,
+                                                                                technology_filter=technologies,
+                                                                                test_periods=test_periods
+                                                                                )
+
+    subset_length = 1000
+    train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
+    print(f"Train/Val Dataset shape: {train_val_df.shape}")
+
+    
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
-    exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek",  "DayOfYear", "State"}
-    stand_cols = [f for f in feature_cols if  all([not f.startswith(exc) for exc in exclude])]
+    exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
+    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_cos") and f not in exclude]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
     
 
@@ -127,21 +141,22 @@ def main() -> None:
 
     # 1) XGBoost
     xgb_common_build = {
-                        "feature_cols" : feature_cols,
-                        "target_cols"  : target_cols,
-                        "eval_metric"  : "logloss",
-                        "objective"    : "reg:logistic",
+                        "feature_cols" : feature_names,
+                        "target_cols"  : target_columns,
+                        "eval_metric"  : "mlogloss",
+                        "objective"    : "multi:softprob",
+                        "num_classes"  : 3,
                         "early_stopping_rounds" : 10,
                         "device"          : args.device,     
                         }
     xgb_build_grid = {
-                        "max_depth":   [4, 6, 8, 10],
-                        "eta":         [0.04, 0.05, 0.06, 0.07, 0.08, 0.1],
-                        "gamma":       [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                        "reg_lambda":  [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                        "subsample"       : [0.7, 0.8, 0.85, 0.9, 0.95, 1.0],
+                        "max_depth":   [4],#, 6, 8, 10],
+                        "eta":         [0.04],#, 0.05, 0.06, 0.07, 0.08, 0.1],
+                        "gamma":       [0.4],#, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                        "reg_lambda":  [0.4],#, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                        "subsample"       : [0.7],#, 0.8, 0.85, 0.9, 0.95, 1.0],
                         "num_boost_round" : [500]#[50, 100, 200, 500, 800] #100:4862667;   200:4862669;   500:4854137;   800:4854139   /4904 per state & sum_boost_round = 230,485 per num_boost = 921,940 total = 711.86 MB
-                        } #462.35 MB = 598,800 /# 13 data points per 0.01 MB
+                        } 
 
     xgb_common_train = {
                         "weights_data": True,
@@ -150,9 +165,9 @@ def main() -> None:
 
     # 2) MLP
     mlp_common_build = {
-        "feature_cols": feature_cols,
-        "target_cols":  target_cols,
-        "out_act_fn":   "sigmoid",
+        "feature_cols": feature_names,
+        "target_cols":  target_columns,
+        "num_classes": 3,
     }
     mlp_build_grid = {
         "hidden_sizes": [
@@ -172,7 +187,7 @@ def main() -> None:
     }
     mlp_common_train =  {
                         "optimizer": "adam",
-                        "loss": "logloss",
+                        "loss": "cross_entropy",
                         "regularization_type": "L2",
                         "weights_data": True,
                         "device": args.device,
@@ -183,10 +198,10 @@ def main() -> None:
                         }
     
     mlp_train_grid = {
-                    "lambda_reg"          : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3],
+                    "lambda_reg"          : [5e-5],#, 1e-4, 2e-4, 4e-4, 1e-3],
                     "epochs"              : [2000],   # upper bound — levels will cap
-                    "batch_size"          : [128, 256],
-                    "lr"                  : [1e-4, 2e-4, 4e-4, 1e-3],
+                    "batch_size"          : [128],#, 256],
+                    "lr"                  : [1e-4],#, 2e-4, 4e-4, 1e-3],
                     "patience"            : [50],
                     "min_delta"           : [5e-5],
                     "flat_delta"          : [1e-4],
@@ -231,7 +246,7 @@ def main() -> None:
     val_metric = {spec["name"]: "logloss" for spec in model_specs}
 
     # Training levels (successive halving caps)
-    n_rows = len(data_df)
+    n_rows = len(train_val_df)
     training_levels = [
         {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.60)},
         {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
@@ -241,9 +256,9 @@ def main() -> None:
     # ---------- Run search ----------
     winners = im.successive_halving_search(
         model_specs=model_specs,
-        data=data_df,
+        data=train_val_df,
         standardize=stand_cols,
-        result_csv=str(args.result_csv),
+        result_csv=str(args.result_csv)+f"_{args.models}_{args.technologies}_{args.initial_state}"+".csv",
         train_ratio=1.0 - args.val_frac,
         val_ratio=args.val_frac,
         val_metric_per_model=val_metric,
