@@ -1165,6 +1165,7 @@ class MLP(GeneratorFailureProbabilityInference):
             "kwargs": {
                 "feature_cols": feature_cols,
                 "target_cols": target_cols,
+                "num_classes": num_classes,
                 "hidden_sizes": hidden_sizes,
                 "activations": activations,
                 "out_act_fn": out_act_fn,
@@ -1886,7 +1887,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             num_class=num_classes,
             verbosity=1 if self.verbose else 0,
             device=device,
-        )
+            )
 
         # record rebuild spec
         self._build_spec = {
@@ -1902,6 +1903,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
                 "eval_metric": eval_metric,
                 "objective": objective,
                 "early_stopping_rounds": early_stopping_rounds,
+                "num_classes":num_classes,
                 "subsample": subsample,
                 "device": device,
             },
@@ -1953,18 +1955,32 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         - None
         """
         if self.model is not None:
-            self.model = xgb.XGBRegressor(
-                max_depth=self.max_depth,
-                eta=self.eta,
-                gamma=self.gamma,
-                reg_lambda=self.reg_lambda,
-                n_estimators=self.num_boost_round,
-                subsample=self.subsample,
-                eval_metric=self.eval_metric,
-                objective=self.objective,
-                verbosity=1 if self.verbose else 0,
-                device=self.device,
-            )
+            self.model = xgb.XGBClassifier(
+                                max_depth=self.max_depth,
+                                eta=self.eta,
+                                gamma=self.gamma,
+                                reg_lambda=self.reg_lambda,
+                                n_estimators=self.num_boost_round,
+                                subsample=self.subsample,
+                                eval_metric=self.eval_metric,
+                                objective=self.objective,
+                                early_stopping_rounds=self.early_stopping_rounds,
+                                num_class=self.num_classes,
+                                verbosity=1 if self.verbose else 0,
+                                device=self.device,
+                            )
+            # self.model = xgb.XGBRegressor(
+            #     max_depth=self.max_depth,
+            #     eta=self.eta,
+            #     gamma=self.gamma,
+            #     reg_lambda=self.reg_lambda,
+            #     n_estimators=self.num_boost_round,
+            #     subsample=self.subsample,
+            #     eval_metric=self.eval_metric,
+            #     objective=self.objective,
+            #     verbosity=1 if self.verbose else 0,
+            #     device=self.device,
+            # )
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
@@ -2076,6 +2092,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             },
             "train": {
                 "early_stopping_rounds": getattr(self, "early_stopping_rounds", None),
+                "num_classes": getattr(self, "num_classes", None)
             },
         }
 
@@ -2114,6 +2131,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         obj.feature_cols = data_section.get("feature_cols", None)
         obj.target_cols = data_section.get("target_cols", None)
         obj.standardize = data_section.get("standardize", False)
+        obj.num_classes = train_section.get("num_classes", getattr(obj, "num_classes", None))
 
         if not build_spec or "builder" not in build_spec or "kwargs" not in build_spec:
             raise RuntimeError("Invalid or missing build_spec in checkpoint.")
@@ -2129,6 +2147,19 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             booster = xgb.Booster()
             booster.load_model(bytearray(booster_raw))
             obj.model._Booster = booster
+
+            # --- restore sklearn wrapper metadata ---
+            try:
+                n_classes = getattr(obj, "num_classes", None)
+                if n_classes is None or n_classes < 1:
+                    n_classes = sk_params.get("num_class", None)
+                if n_classes is not None:
+                    obj.model.n_classes_ = int(n_classes)
+                    obj.model.classes_ = np.arange(int(n_classes))
+            except Exception as e:
+                if verbose:
+                    print(f"[warning] Failed to set n_classes_: {e}")
+
             try:
                 obj.model.n_features_in_ = len(obj.feature_cols or [])
             except Exception:
