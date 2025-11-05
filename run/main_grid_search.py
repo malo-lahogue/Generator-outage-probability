@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
 
     # Grid search params
-    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log_per_state")# .csv added later
+    p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log")# .csv added later
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
@@ -84,7 +84,7 @@ def main() -> None:
 
     # I/O prep
     ensure_inputs_exist(args.failures, args.weather, args.powerload)
-    print(f"Computing transition probabilities starting from state {args.initial_state} for {args.technologies} generators.")
+    print(f"Grid search for transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
@@ -128,7 +128,7 @@ def main() -> None:
     
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
     exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
-    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_cos") and f not in exclude]
+    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_sin") and not f.endswith("_cos") and not f.endswith("_cos") and f not in exclude]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
     
 
@@ -248,8 +248,8 @@ def main() -> None:
     # Training levels (successive halving caps)
     n_rows = len(train_val_df)
     training_levels = [
-        {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.60)},
-        {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.80)},
+        {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.50)},
+        {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.75)},
         {"name": "L3-full",   "epochs": 2000, "data_cap": None},
     ]
 
@@ -264,8 +264,7 @@ def main() -> None:
         val_metric_per_model=val_metric,
         levels=training_levels,
         top_keep_ratio=args.top_keep,
-        resume=args.reuse_results,
-        model_per_state=True
+        resume=args.reuse_results
         # seed=args.seed,  # if supported by your helper
     )
 

@@ -82,7 +82,7 @@ def main() -> None:
 
     # I/O prep
     ensure_inputs_exist(args.failures, args.weather, args.powerload)
-    print(f"Computing transition probabilities starting from state {args.initial_state} for {args.technologies} generators.")
+    print(f"Computing transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
@@ -119,20 +119,18 @@ def main() -> None:
                                                                                 test_periods=test_periods
                                                                                 )
 
-    subset_length = 1000
+    subset_length = 1000000
     train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
     print(f"Train/Val Dataset shape: {train_val_df.shape}")
 
     
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
     exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
-    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_cos") and f not in exclude]
+    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_sin") and not f.endswith("_cos") and f not in exclude]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
     
 
     if "xgb" in args.models:
-        build_params = {"device": "cuda", "early_stopping_rounds": 10, "eta": 0.06, "eval_metric": "logloss", "feature_cols": ["CDD", "CDD_7d", "ExtremeCold", "ExtremeHeat", "ExtremeWind", "FDD", "FDD_7d", "HDD", "HDD_7d", "Holiday", "PAVG", "PDMAX", "PMAX", "PMIN", "PRCP", "PRCP_30d_sum", "SNOW", "SNWD", "SnowSeverity", "TAVG", "TMAX", "TMIN", "Weekend", "State_ALABAMA", "State_ALBERTA", "State_ARIZONA", "State_ARKANSAS", "State_BRITISH COLUMBIA", "State_CALIFORNIA", "State_COLORADO", "State_FLORIDA", "State_GEORGIA", "State_IDAHO", "State_INDIANA", "State_IOWA", "State_KANSAS", "State_KENTUCKY", "State_LOUISIANA", "State_MAINE", "State_MARYLAND", "State_MASSACHUSETTS", "State_MICHIGAN", "State_MINNESOTA", "State_MISSISSIPPI", "State_MISSOURI", "State_MONTANA", "State_NEBRASKA", "State_NEVADA", "State_NEW BRUNSWICK", "State_NEW HAMPSHIRE", "State_NEW JERSEY", "State_NEW MEXICO", "State_NEW YORK", "State_NORTH CAROLINA", "State_NORTH DAKOTA", "State_OHIO", "State_OKLAHOMA", "State_ONTARIO", "State_OREGON", "State_PENNSYLVANIA", "State_SOUTH CAROLINA", "State_SOUTH DAKOTA", "State_TENNESSEE", "State_TEXAS", "State_UTAH", "State_VIRGINIA", "State_WASHINGTON", "State_WEST VIRGINIA", "State_WISCONSIN", "State_WYOMING", "Season_sin", "Season_cos", "Month_sin", "Month_cos", "DayOfWeek_sin", "DayOfWeek_cos", "DayOfYear_sin", "DayOfYear_cos"], "gamma": 0.2, "max_depth": 2, "num_boost_round": 1500, "objective": "reg:logistic", "reg_lambda": 0.7, "subsample": 1.0, "target_cols": ["C_0"]}
-        train_params = {"weights_data": True}
 
         xgb_model = im.xgboostModel(verbose=False)
         xgb_model.build_model(max_depth=6,
@@ -149,20 +147,17 @@ def main() -> None:
                             device=args.device,
                             early_stopping_rounds=10)
         
-        xgb_model.build_model(**build_params)
 
         xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols)
 
-        # xgb_model.train_model(weights_data=True)
-        xgb_model.train_model(**train_params)        
+        xgb_model.train_model(weights_data=True)
 
-        path_to_save = THIS_DIR / "../Results/Models" / "XGB_global_model_{args.technologies}_{args.initial_state}.pth"
+        path_to_save = THIS_DIR / "../Results/Models" / f"XGB_global_model_{args.technologies}_{args.initial_state}.pth"
 
         xgb_model.save_model(path_to_save)
 
 
     elif "mlp" in args.models:
-        # build_params = {"activations": ["relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu"], "feature_cols": ["CDD", "CDD_7d", "ExtremeCold", "ExtremeHeat", "ExtremeWind", "FDD", "FDD_7d", "HDD", "HDD_7d", "Holiday", "PAVG", "PDMAX", "PMAX", "PMIN", "PRCP", "PRCP_30d_sum", "SNOW", "SNWD", "SnowSeverity", "TAVG", "TMAX", "TMIN", "Weekend", "State_ALABAMA", "State_ALBERTA", "State_ARIZONA", "State_ARKANSAS", "State_BRITISH COLUMBIA", "State_CALIFORNIA", "State_COLORADO", "State_FLORIDA", "State_GEORGIA", "State_IDAHO", "State_INDIANA", "State_IOWA", "State_KANSAS", "State_KENTUCKY", "State_LOUISIANA", "State_MAINE", "State_MARYLAND", "State_MASSACHUSETTS", "State_MICHIGAN", "State_MINNESOTA", "State_MISSISSIPPI", "State_MISSOURI", "State_MONTANA", "State_NEBRASKA", "State_NEVADA", "State_NEW BRUNSWICK", "State_NEW HAMPSHIRE", "State_NEW JERSEY", "State_NEW MEXICO", "State_NEW YORK", "State_NORTH CAROLINA", "State_NORTH DAKOTA", "State_OHIO", "State_OKLAHOMA", "State_ONTARIO", "State_OREGON", "State_PENNSYLVANIA", "State_SOUTH CAROLINA", "State_SOUTH DAKOTA", "State_TENNESSEE", "State_TEXAS", "State_UTAH", "State_VIRGINIA", "State_WASHINGTON", "State_WEST VIRGINIA", "State_WISCONSIN", "State_WYOMING", "Season_sin", "Season_cos", "Month_sin", "Month_cos", "DayOfWeek_sin", "DayOfWeek_cos", "DayOfYear_sin", "DayOfYear_cos"], "hidden_sizes": [256, 256, 128, 64, 32, 16, 8, 4], "out_act_fn": "sigmoid", "target_cols": ["C_0"]}
 
 
         mlp_model = im.MLP(verbose=False)
@@ -171,14 +166,13 @@ def main() -> None:
                             num_classes=3,
                             hidden_sizes=(100, 50),
                             activations=('relu', 'relu'))
-        mlp_model.build_model(**build_params)
 
         mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols)
         mlp_model.train_model(optimizer='adam', 
                               loss='cross_entropy',
                                 regularization_type='L2', lambda_reg=1e-3,
                                 weights_data=True,
-                                epochs=10, batch_size=10, lr=2e-4,
+                                epochs=10, batch_size=1024, lr=2e-4,
                                 device=args.device,
                                 # smart stopping knobs
                                 early_stopping=True, patience=15, min_delta=1e-4,

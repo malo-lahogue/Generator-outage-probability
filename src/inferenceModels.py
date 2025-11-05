@@ -494,8 +494,8 @@ class GeneratorFailureProbabilityInference:
             )
 
 
-        if any(r < 0 for r in (train_ratio, val_ratio, test_ratio)):
-            raise ValueError("train_ratio, val_ratio, and test_ratio must be non-negative.")
+        if any(r < 0 for r in (train_ratio, val_ratio)):
+            raise ValueError("train_ratio and val_ratio must be non-negative.")
         if train_ratio + val_ratio  > 1.0 + 1e-9:
             raise ValueError("train_ratio + val_ratio + test_ratio must be ≤ 1.0.")
 
@@ -2569,7 +2569,7 @@ def successive_halving_search(
                 model_obj.build_model(**build_kw)
                 model_obj.prepare_data(
                     data=sub_data,
-                    train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=1.0-(train_ratio + val_ratio),
+                    train_ratio=train_ratio, val_ratio=val_ratio,
                     standardize=standardize
                 )
                 # ensure fresh weights
@@ -2584,7 +2584,7 @@ def successive_halving_search(
                 # Warm start (MLP only): keep weights; re-prepare data (in case data_cap grew)
                 model_obj.prepare_data(
                     data=sub_data,
-                    train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=0.0,
+                    train_ratio=train_ratio, val_ratio=val_ratio,
                     standardize=standardize
                 )
                 # train only the *additional* epochs at this level
