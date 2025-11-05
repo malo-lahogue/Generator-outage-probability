@@ -31,15 +31,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Data paths
-    p.add_argument("--failures",  type=Path, default=THIS_DIR / "../DATA/filtered_events.csv")
-    p.add_argument("--events",    type=Path, default=THIS_DIR / "../DATA/event_count.csv")
-    p.add_argument("--weather",   type=Path, default=THIS_DIR / "../DATA/weather_data_per_state_all.csv")
-    p.add_argument("--powerload", type=Path, default=THIS_DIR / "../DATA/power_load_input.csv")
+    p.add_argument("--failures",  type=Path, default=THIS_DIR / "../DATA/hourly/hourly_failure_dataset_compressed.csv")
+    p.add_argument("--weather",   type=Path, default=THIS_DIR / "../DATA/hourly/hourly_weather_by_state.csv")
+    p.add_argument("--powerload", type=Path, default=THIS_DIR / "../DATA/hourly/hourly_load_by_state.csv")
 
     # Problem params
-    p.add_argument("--target",   type=str, choices=["Unit_Failure", "Frequency"], default="Frequency",
-                   help='Prediction target. "Unit_Failure" = unit-level labels, "Frequency" = daily-state aggregate.')
-    p.add_argument("--clusters", type=int, default=1, help="Cause-code clusters (1 = no clustering).")
+    p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
+    p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
 
     
     # Runtime / reproducibility
@@ -60,21 +58,17 @@ def ensure_inputs_exist(*paths: Path) -> None:
         raise FileNotFoundError("Missing required input file(s):\n  " + "\n  ".join(missing))
 
 def load_feature_bases(weather_path: Path, powerload_path: Path) -> list[str]:
-    weather = pd.read_csv(
-        weather_path, index_col=["Date", "State"], parse_dates=["Date"],
-        usecols=lambda c: c not in ["Unnamed: 0"]
-    )
-    power = pd.read_csv(
-        powerload_path, index_col=["Date", "State"], parse_dates=["Date"],
-        usecols=lambda c: c not in ["Unnamed: 0"]
-    )
-    base = list(weather.columns) + list(power.columns) + ["Season", "Month", "DayOfWeek", "DayOfYear", "Holiday", "Weekend"]
+    weather = pd.read_csv(weather_path, parse_dates=["datetime"])
+    power =  pd.read_csv(powerload_path, parse_dates=["UTC time"])
+    base = list(weather.columns) + list(power.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend', 'Technology']
+
     # Remove duplicates but keep stable order
     seen = set()
     base = [c for c in base if not (c in seen or seen.add(c))]
     # Drop known non-features if present
-    drop = {"EventStartDT", "Date", "PRCP_30dz"}
+    drop = {'datetime', 'UTC time', 'Datetime_UTC', 'Datetime'}
     feats = [c for c in base if c not in drop]
+    feats = list(set([(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in feats]))
     feats.sort()
     return feats
 
@@ -87,29 +81,52 @@ def main() -> None:
     np.random.seed(args.seed)   # Reproducibility
 
     # I/O prep
-    ensure_inputs_exist(args.failures, args.events, args.weather, args.powerload)
+    ensure_inputs_exist(args.failures, args.weather, args.powerload)
+    print(f"Computing transition probabilities starting from state {args.initial_state} for {args.technologies} generators.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
     print(f"{len(feature_names)} initial features: {feature_names}")
 
-    # ---------- Merge + label prep ----------
-    data_df, feature_cols, target_cols = im.preprocess_data(
-        failure_path=args.failures,
-        event_count_path=args.events,
-        weather_data_path=args.weather,
-        power_data_path=args.powerload,
-        feature_names=feature_names,
-        target=args.target,
-        state_one_hot=True,
-        cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
-        cause_code_n_clusters=args.clusters,
-        feature_na_drop_threshold=0.10
-    )
+    technologies = {'nuclear': ['Nuclear'],
+                    'hydro': ['Pumped Storage/Hydro'],
+                    'geothermal': ['Geothermal'],
+                    'thermal': ['CC GT units ', 
+                                'CC steam units', 
+                                'Co-generator Block ', 
+                                'CoG GT units', 
+                                'CoG steam units ', 
+                                'Combined Cycle Block', 
+                                'Fluidized Bed', 'Fossil-Steam', 
+                                'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
+                                'Gas Turbine/Jet Engine with HSRG', 
+                                'Internal Combustion/Reciprocating Engines',
+                                'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
+    if technologies is None:
+        raise ValueError(f"Unknown technology group: {args.technologies}. Choose from 'nuclear', 'hydro', 'geothermal', or 'thermal'.")
+    
+    test_periods = [(pd.Timestamp('2022-01-01'), pd.Timestamp('2023-12-31'))]
 
+    # ---------- Merge + label prep ----------
+    train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
+                                                                                weather_data_path=args.weather,
+                                                                                power_load_data_path=args.powerload,
+                                                                                feature_names=feature_names,
+                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
+                                                                                state_one_hot=True,
+                                                                                initial_MC_state_filter=args.initial_state,
+                                                                                technology_filter=technologies,
+                                                                                test_periods=test_periods
+                                                                                )
+
+    subset_length = 1000
+    train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
+    print(f"Train/Val Dataset shape: {train_val_df.shape}")
+
+    
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
     exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
-    stand_cols = [f for f in feature_cols if not f.startswith("State_") and f not in exclude]
+    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_cos") and f not in exclude]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
     
 
@@ -132,7 +149,7 @@ def main() -> None:
         #                     early_stopping_rounds=10)
         xgb_model.build_model(**build_params)
 
-        xgb_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
+        xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols)
 
         # xgb_model.train_model(weights_data=True)
         xgb_model.train_model(**train_params)        
@@ -155,7 +172,7 @@ def main() -> None:
         #                     out_act_fn='sigmoid')
         mlp_model.build_model(**build_params)
 
-        mlp_model.prepare_data(data_df, train_ratio=0.80, val_ratio=0.1, test_ratio=0.1, standardize=stand_cols)
+        mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols)
         mlp_model.train_model(optimizer='adam',
                               loss = 'logloss',
                               regularization_type = 'L2',
