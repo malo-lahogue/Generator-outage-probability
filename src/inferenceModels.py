@@ -66,6 +66,7 @@ def preprocess_data(
     initial_MC_state_filter: str = 'all',
     technology_filter: List[str] = None,
     state_one_hot: bool = True,
+    technology_one_hot: bool = True,
     cyclic_features: List[str] = None,
     dropNA: bool = True,
     feature_na_drop_threshold: float = 0.2,
@@ -199,7 +200,7 @@ def preprocess_data(
 
     merged_data.reset_index(drop=True, inplace=True)
 
-
+    # ----------- State encoding ------------
     if state_one_hot:
         merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
         if "State" in feature_names:
@@ -214,7 +215,12 @@ def preprocess_data(
             integer_encoding["States"] = cats
 
     # ------------ Technology encodding ------------
-    if "Technology" in merged_data.columns:
+    if technology_one_hot and "Technology" in merged_data.columns:
+        merged_data = pd.get_dummies(merged_data, columns=["Technology"], drop_first=False, dtype=int)
+        if "Technology" in feature_names:
+            feature_names.remove("Technology")
+        feature_names += [c for c in merged_data.columns if c.startswith("Technology_")]
+    elif "Technology" in merged_data.columns:
         if "Technology" not in feature_names:
             feature_names.append("Technology")
         if isinstance(merged_data.iloc[0]["Technology"], str): # convert to categorical codes
@@ -1349,7 +1355,7 @@ class MLP(GeneratorFailureProbabilityInference):
             elif scheduler is not None:
                 scheduler.step()
 
-            if self.verbose and (ep % 10 == 0 or ep == 1):
+            if self.verbose:# and (ep % 10 == 0 or ep == 1):
                 print(f"Epoch {ep:03d}: train={train_loss:.4e} | val={val_loss:.4e}")
 
             if early_stopping and stopper.step(val_loss, model=self.model):
