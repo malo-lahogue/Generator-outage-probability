@@ -1413,13 +1413,15 @@ class MLP(GeneratorFailureProbabilityInference):
             stand_targets = []
 
         X_np = X_df[self.feature_cols].to_numpy(dtype=np.float32)
-        y_pred = self.model(torch.tensor(X_np, dtype=torch.float32, device=device)).detach().cpu().numpy()
+        pred_logits = self.model(torch.tensor(X_np, dtype=torch.float32, device=device)).detach().cpu().numpy()
 
         # inverse-transform targets if we standardized them
         if self.scaler_target is not None and stand_targets:
-            y_df = pd.DataFrame(y_pred, columns=self.target_cols)
+            y_df = pd.DataFrame(pred_logits, columns=self.target_cols)
             y_df.loc[:, stand_targets] = self.scaler_target.inverse_transform(y_df[stand_targets].to_numpy())
-            y_pred = y_df[self.target_cols].to_numpy(dtype=np.float32)
+            pred_logits = y_df[self.target_cols].to_numpy(dtype=np.float32)
+        
+        y_pred = torch.softmax(torch.tensor(pred_logits), dim=1).numpy()
 
         return y_pred
 
