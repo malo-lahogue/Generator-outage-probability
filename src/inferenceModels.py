@@ -72,6 +72,7 @@ def preprocess_data(
     feature_na_drop_threshold: float = 0.2,
     test_periods: List[Tuple[pd.Timestamp, pd.Timestamp]] = None,
     seed: Optional[int] = 42,
+    keep_initial_state: bool = False
 ) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, int]]]:
     """
     Preprocess and merge generator failure, weather, and power-load datasets at daily, state-level resolution.
@@ -338,6 +339,8 @@ def preprocess_data(
         test_df = merged_data.iloc[0:0].copy().reset_index(drop=True)
         train_val_df = merged_data.copy().reset_index(drop=True)
     cols = ['Datetime_UTC']+cols
+    if keep_initial_state:
+        cols = ['Initial_gen_state']+cols
     test_df = test_df[cols].copy()
     train_val_df = train_val_df[cols].copy()
     return train_val_df, test_df, feature_names, target_columns, integer_encoding
