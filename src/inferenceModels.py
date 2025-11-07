@@ -202,9 +202,11 @@ def preprocess_data(
     merged_data.reset_index(drop=True, inplace=True)
 
     # --------- Drop unecessary features and group -------
-
-    merged_data = merged_data[feature_names + ['Datetime_UTC', 'Final_gen_state', 'Data_weight']+['Initial_gen_state' if keep_initial_state else None]].copy()
-    merged_data = merged_data.groupby(['Datetime_UTC', 'Final_gen_state']+['Initial_gen_state' if keep_initial_state else None] + feature_names).sum('Data_weight').reset_index()
+    feat_keep = feature_names + ['Datetime_UTC', 'Final_gen_state']
+    if keep_initial_state:
+        feat_keep.append('Initial_gen_state') 
+    merged_data = merged_data[feat_keep+['Data_weight']].copy()
+    merged_data = merged_data.groupby(feat_keep).sum('Data_weight').reset_index()
 
     # ----------- State encoding ------------
     if 'State' in merged_data.columns:
