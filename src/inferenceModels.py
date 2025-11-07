@@ -203,22 +203,23 @@ def preprocess_data(
 
     # --------- Drop unecessary features and group -------
 
-    merged_data = merged_data[feature_names + ['Datetime_UTC', 'Final_gen_state', 'Data_weight']].copy()
-    merged_data = merged_data.groupby(['Datetime_UTC', 'State'] + feature_names).sum('Data_weight').reset_index()
+    merged_data = merged_data[feature_names + ['Datetime_UTC', 'Final_gen_state', 'Data_weight']+['Initial_gen_state' if keep_initial_state else None]].copy()
+    merged_data = merged_data.groupby(['Datetime_UTC', 'Final_gen_state']+['Initial_gen_state' if keep_initial_state else None] + feature_names).sum('Data_weight').reset_index()
 
     # ----------- State encoding ------------
-    if state_one_hot:
-        merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
-        if "State" in feature_names:
-            feature_names.remove("State")
-        feature_names += [c for c in merged_data.columns if c.startswith("State_")]
-    else:
-        if "State" not in feature_names:
-            feature_names.append("State")
-        if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
-            cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
-            merged_data["State"] = merged_data["State"].map(cats)
-            integer_encoding["States"] = cats
+    if 'State' in merged_data.columns:
+        if state_one_hot:
+            merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
+            if "State" in feature_names:
+                feature_names.remove("State")
+            feature_names += [c for c in merged_data.columns if c.startswith("State_")]
+        else:
+            if "State" not in feature_names:
+                feature_names.append("State")
+            if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
+                cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
+                merged_data["State"] = merged_data["State"].map(cats)
+                integer_encoding["States"] = cats
 
     # ------------ Technology encodding ------------
     if technology_one_hot and "Technology" in merged_data.columns:
