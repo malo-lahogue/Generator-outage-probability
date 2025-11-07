@@ -200,6 +200,11 @@ def preprocess_data(
 
     merged_data.reset_index(drop=True, inplace=True)
 
+    # --------- Drop unecessary features and group -------
+
+    merged_data = merged_data[feature_names + ['Datetime_UTC', 'Final_gen_state', 'Data_weight']].copy()
+    merged_data = merged_data.groupby(['Datetime_UTC', 'State'] + feature_names).sum('Data_weight').reset_index()
+
     # ----------- State encoding ------------
     if state_one_hot:
         merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
