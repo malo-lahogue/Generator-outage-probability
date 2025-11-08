@@ -38,6 +38,8 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KernelDensity
+
 
 # 3) Finally xgboost and the rest
 import xgboost as xgb
@@ -125,6 +127,8 @@ def preprocess_data(
         failure_df.rename(columns={'Geographical State': 'State'}, inplace=True)
     if 'Count' in failure_df.columns:
         failure_df.rename(columns={'Count': 'Data_weight'}, inplace=True)
+    else:
+        failure_df['Data_weight'] = 1.0
     failure_df['State'] = failure_df['State'].str.upper()
 
     if technology_filter is not None:
@@ -476,73 +480,85 @@ class GeneratorFailureProbabilityInference:
         train_ratio: float = 0.8,
         val_ratio: float = 0.2,
         standardize: Union[bool, list[str]] = False,
-        model_per_state: bool = False,
-        ) -> None:
+        reweight_train_data_density: bool | str = False,
+    ) -> None:
         """
-            Split data into train/val/test and (optionally) standardize columns.
+        Split data into train/val (no test here), optionally standardize, and reweight samples.
 
-            Notes:
-            - Requires `self.feature_cols` and `self.target_cols` to be set by the subclass
-            (e.g., in `build_model`).
-            - If `standardize is True`, all feature/target columns are standardized.
-            - If `standardize is a list[str]`, only those columns are standardized.
+        Args:
+            data (pd.DataFrame): Input full dataset with features, targets, and optional 'Data_weight'.
+            train_ratio (float): Proportion of data to allocate to training.
+            val_ratio (float): Proportion to allocate to validation.
+            standardize (bool | list[str]): Whether/which columns to standardize.
+            reweight_train_data_density (bool | str): If str, must be column name to reweight by density.
 
-            INPUTS:
-            - data (pd.DataFrame) : Full dataset containing features/targets (+ optional 'Data_weight').
-            - train_ratio (float) : Fraction for training set.
-            - val_ratio (float) : Fraction for validation set.
-            - standardize (bool | list[str]) : Whether/which columns to standardize.
-            - linear_transform_m_p (tuple[float,float]) : Placeholder affine transform for targets (not implemented).
-            - model_per_state (bool) : If True, intended per-state training (not implemented here).
-
-            OUTPUTS:
-            - None : Creates `self.train_data`, `self.val_data`, `self.test_data`,
-                    and, if standardization was requested, `self.scaler_feature` and `self.scaler_target`.
+        Returns:
+            None. Sets self.train_data, self.val_data, etc.
         """
-        # ---- guards ----
+        # --- guards ---
         for attr in ("feature_cols", "target_cols"):
             if not hasattr(self, attr) or getattr(self, attr) is None:
-                raise AttributeError(
-                    f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set (call build_model first)."
-                )
-
-        if model_per_state:
-            raise NotImplementedError(
-                "model_per_state is not yet implemented in this base scaffold."
-            )
+                raise AttributeError(f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set.")
 
 
         if any(r < 0 for r in (train_ratio, val_ratio)):
             raise ValueError("train_ratio and val_ratio must be non-negative.")
-        if train_ratio + val_ratio  > 1.0 + 1e-9:
-            raise ValueError("train_ratio + val_ratio + test_ratio must be ≤ 1.0.")
+        if train_ratio + val_ratio > 1.0 + 1e-9:
+            raise ValueError("train_ratio + val_ratio must be ≤ 1.0.")
 
+        # --- clone dataset and store config ---
         self.dataset_df = data.copy()
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.standardize = standardize
-        self.model_per_state = model_per_state
 
-        # ---- split (tail = test) ----
-        N = len(self.dataset_df)
         ds = self.dataset_df
+        N = len(ds)
 
-        # Now allocate train/val on the remaining ds (exact partition to avoid random_split length mismatch)
-        ds_len = len(ds)
-        if (train_ratio + val_ratio) <= 0:
-            train_size = ds_len
+        # --- deterministic split ---
+        if train_ratio + val_ratio == 0:
+            train_size = N
             val_size = 0
         else:
-            train_size = int(round(ds_len * (train_ratio / (train_ratio + val_ratio))))
-            train_size = max(0, min(train_size, ds_len))
-            val_size = ds_len - train_size
+            train_size = int(round(N * (train_ratio / (train_ratio + val_ratio))))
+            val_size = N - train_size
 
-        # ---- standardize if requested ----
+        rng = torch.Generator().manual_seed(42)
+        perm = torch.randperm(N, generator=rng).tolist()
+        self._train_idx = train_idx = perm[:train_size]
+        self._val_idx = val_idx = perm[train_size:train_size + val_size]
+
+        # --- reweight data if requested ---
+        if reweight_train_data_density:
+            if not isinstance(reweight_train_data_density, str):
+                raise ValueError("'reweight_train_data_density' must be False or a column name.")
+            col = reweight_train_data_density
+            X = ds.iloc[train_idx][[col]].to_numpy()
+
+            # KDE over training column
+            bandwidth = max((X.max() - X.min()) / 10, 1e-6)
+            kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(X)
+
+            # Build interpolation grid for smooth weighting
+            X_grid = np.quantile(X.flatten(), np.linspace(0, 1, 100)).reshape(-1, 1)
+            log_dens = kde.score_samples(X_grid)
+            density = np.exp(log_dens)
+
+            # Interpolate density at training points
+            raw_vals = X.flatten()
+            interp_dens = np.interp(raw_vals, X_grid.flatten(), density)
+            interp_weights = 1.0 / (interp_dens + 1e-10)
+            interp_weights /= np.mean(interp_weights)
+
+            # Apply weights
+            if 'Data_weight' not in ds.columns:
+                ds['Data_weight'] = 1.0
+            ds.loc[train_idx, 'Data_weight'] *= interp_weights
+
+        # --- standardization ---
         self.scaler_feature = None
         self.scaler_target = None
-
         if standardize is True or isinstance(standardize, list):
-            # fit scalers on pre-test data only
             self.scaler_feature = StandardScaler()
             self.scaler_target = StandardScaler()
 
@@ -550,31 +566,27 @@ class GeneratorFailureProbabilityInference:
                 stand_features = list(self.feature_cols)
                 stand_targets = list(self.target_cols)
             else:
-                # only those listed and present
                 present = set(ds.columns)
-                stand_features = [c for c in self.feature_cols if c in standardize and c in present]
-                stand_targets = [c for c in self.target_cols if c in standardize and c in present]
+                stand_features = [f for f in self.feature_cols if f in standardize and f in present]
+                stand_targets = [t for t in self.target_cols if t in standardize and t in present]
 
-            ds = ds.copy()
             if stand_features:
-                ds.loc[:, stand_features] = self.scaler_feature.fit_transform(ds[stand_features].to_numpy())
+                ds.loc[:, stand_features] = self.scaler_feature.fit_transform(ds[stand_features])
             if stand_targets:
-                ds.loc[:, stand_targets] = self.scaler_target.fit_transform(ds[stand_targets].to_numpy())
+                ds.loc[:, stand_targets] = self.scaler_target.fit_transform(ds[stand_targets])
 
-        # ---- store splits ----
+        # --- construct datasets ---
         if self.__class__.__name__ == "MLP":
-            # torch Dataset + exact split lengths
             ds_torch = OptSurrogateDataset(ds, feature_cols=self.feature_cols, target_cols=self.target_cols)
-            self.train_data, self.val_data = random_split(
-                ds_torch,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42),
-            )
+            self.train_data = torch.utils.data.Subset(ds_torch, train_idx)
+            self.val_data   = torch.utils.data.Subset(ds_torch, val_idx)
         else:
-            # pandas splits (shuffle for fairness)
-            ds_shuf = ds.sample(frac=1.0, random_state=42).reset_index(drop=True)
-            self.train_data = ds_shuf.iloc[:train_size]
-            self.val_data = ds_shuf.iloc[train_size : train_size + val_size]
+            # fallback to Pandas splits (slice-based)
+            self.train_data = ds.iloc[train_idx].reset_index(drop=True)
+            self.val_data   = ds.iloc[val_idx].reset_index(drop=True)
+
+
+
 
     # ---------------------- Plotting ----------------------
 
