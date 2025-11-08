@@ -205,6 +205,7 @@ def preprocess_data(
     feat_keep = feature_names + ['Datetime_UTC', 'Final_gen_state']
     if keep_initial_state:
         feat_keep.append('Initial_gen_state') 
+    feat_keep = [f for f in feat_keep if f in merged_data.columns]
     merged_data = merged_data[feat_keep+['Data_weight']].copy()
     merged_data = merged_data.groupby(feat_keep).sum('Data_weight').reset_index()
 
