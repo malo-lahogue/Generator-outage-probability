@@ -74,7 +74,8 @@ def preprocess_data(
     feature_na_drop_threshold: float = 0.2,
     test_periods: List[Tuple[pd.Timestamp, pd.Timestamp]] = None,
     seed: Optional[int] = 42,
-    keep_initial_state: bool = False
+    keep_initial_state: bool = False,
+    reweight_train_data_density=False
 ) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, int]]]:
     """
     Preprocess and merge generator failure, weather, and power-load datasets at daily, state-level resolution.
@@ -2435,6 +2436,7 @@ def successive_halving_search(
     warm_start: bool = False,         # if True: keep MLP weights across levels (XGB still fresh)
     verbose=False,
     model_per_state: bool = False,  # if True: save model checkpoint per state (level,candidate)
+    reweight_train_data_density=False
     ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], float]]:
     """
         Successive halving over model families (MLP/XGBoost) and their grids.
@@ -2527,6 +2529,7 @@ def successive_halving_search(
                     warm_start=warm_start,
                     verbose=False,
                     model_per_state=model_per_state,
+                    reweight_train_data_density=reweight_train_data_density
                 )
         if len(states_list) == 1: # only one state, do the search
             state_searching = states_list[0]
@@ -2649,7 +2652,8 @@ def successive_halving_search(
                 model_obj.prepare_data(
                     data=sub_data,
                     train_ratio=train_ratio, val_ratio=val_ratio,
-                    standardize=standardize
+                    standardize=standardize,
+                    reweight_train_data_density=reweight_train_data_density
                 )
                 # ensure fresh weights
                 if hasattr(model_obj, "reset_model"):
@@ -2664,7 +2668,8 @@ def successive_halving_search(
                 model_obj.prepare_data(
                     data=sub_data,
                     train_ratio=train_ratio, val_ratio=val_ratio,
-                    standardize=standardize
+                    standardize=standardize,
+                    reweight_train_data_density=reweight_train_data_density
                 )
                 # train only the *additional* epochs at this level
                 target_epochs   = int(train_kw.get("epochs", level_epochs))
