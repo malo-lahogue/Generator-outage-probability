@@ -64,7 +64,7 @@ def ensure_inputs_exist(*paths: Path) -> None:
 def load_feature_bases(weather_path: Path, powerload_path: Path) -> list[str]:
     weather = pd.read_csv(weather_path, parse_dates=["datetime"])
     power =  pd.read_csv(powerload_path, parse_dates=["UTC time"])
-    base = list(weather.columns) + list(power.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend', 'Technology']
+    base = list(weather.columns) + list(power.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']#, 'Technology']
 
     # Remove duplicates but keep stable order
     seen = set()
@@ -104,6 +104,9 @@ def main() -> None:
                                 'Gas Turbine/Jet Engine with HSRG', 
                                 'Internal Combustion/Reciprocating Engines',
                                 'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
+    
+    technologies = ['Gas Turbine/Jet Engine (Simple Cycle Operation)']
+
     if technologies is None:
         raise ValueError(f"Unknown technology group: {args.technologies}. Choose from 'nuclear', 'hydro', 'geothermal', or 'thermal'.")
     
@@ -120,16 +123,21 @@ def main() -> None:
                                                                                 technology_filter=technologies,
                                                                                 test_periods=test_periods
                                                                                 )
+    
 
-    subset_length = 1000
-    train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
+    # subset_length = 100
+    # train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
     print(f"Train/Val Dataset shape: {train_val_df.shape}")
 
     
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
     exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
-    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.endswith("_isnan") and not f.endswith("_sin") and not f.endswith("_cos") and not f.endswith("_cos") and f not in exclude]
+    stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.startswith("Technology_") and not f.endswith("_isnan") and not f.endswith("_sin") and not f.endswith("_cos") and f not in exclude]
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
+
+    feature_names.sort()
+    stand_cols.sort()
+    target_columns.sort()
     
 
     # ---------- Define model specs ----------
@@ -150,18 +158,18 @@ def main() -> None:
                         "device"          : args.device,     
                         }
     xgb_build_grid = {
-                        "max_depth":   [4],#, 6, 8, 10],
-                        "eta":         [0.04],#, 0.05, 0.06, 0.07, 0.08, 0.1],
-                        "gamma":       [0.4],#, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                        "reg_lambda":  [0.4],#, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                        "subsample"       : [0.7],#, 0.8, 0.85, 0.9, 0.95, 1.0],
-                        "num_boost_round" : [500]#[50, 100, 200, 500, 800] #100:4862667;   200:4862669;   500:4854137;   800:4854139   /4904 per state & sum_boost_round = 230,485 per num_boost = 921,940 total = 711.86 MB
-                        } 
+                        "max_depth":   [6, 8, 10], #[4, 6, 8, 10]
+                        "eta":         [0.04, 0.06, 0.08], # [0.04, 0.05, 0.06, 0.07, 0.08, 0.1]
+                        "gamma":       [0.4, 0.6, 0.8], #[0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+                        "reg_lambda":  [0.4,  0.6,  0.8],
+                        "subsample"       : [0.7, 0.8, 0.9],
+                        "num_boost_round" : [100, 200, 500, 800] #[100, 200, 500]
+                        }
 
     xgb_common_train = {
                         "weights_data": True,
                         # "seed": args.seed,
-                     } #14,700=>24.91MB
+                     }
 
     # 2) MLP
     mlp_common_build = {
@@ -171,18 +179,16 @@ def main() -> None:
     }
     mlp_build_grid = {
         "hidden_sizes": [
-                        (128, 128, 64), #
-                        # (256, 128, 64), #
-                        # (256, 256, 128, 64), #
-                        # (256, 256, 256, 128, 64), #
-                        # (256, 256, 128, 64,  32, 16, 8, 4), ##4839016
-                        # (1024, 256, 64), #
-                        # (2048, 512, 64), #
-                        # (2048, 512),#
-                        # (8192, 1024, 64),#
+                        (256, 512, 256, 128, 64),
+                        # (512, 512, 256, 128, 64),
+                        # (128, 128, 128, 128, 64),
+                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,)
+                        # (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, )
                         ],
         "activations": [
-                        ("relu",) * 3,
+                        ("relu",) * 5,
+                        # ("relu",) * 10,
+                        # ("relu",) * 12,
                         ],
     }
     mlp_common_train =  {
@@ -198,11 +204,11 @@ def main() -> None:
                         }
     
     mlp_train_grid = {
-                    "lambda_reg"          : [5e-5],#, 1e-4, 2e-4, 4e-4, 1e-3],
+                    "lambda_reg"          : [5e-2, 1e-3, 5e-3], # 1e-3
                     "epochs"              : [2000],   # upper bound — levels will cap
-                    "batch_size"          : [128],#, 256],
-                    "lr"                  : [1e-4],#, 2e-4, 4e-4, 1e-3],
-                    "patience"            : [50],
+                    "batch_size"          : [512],
+                    "lr"                  : [2e-4, 4e-4, 1e-3, 2e-3, 4e-3, 7e-3],
+                    "patience"            : [20],
                     "min_delta"           : [5e-5],
                     "flat_delta"          : [1e-4],
                     "flat_patience"       : [50],
@@ -243,14 +249,20 @@ def main() -> None:
         raise SystemExit("No models selected. Use --models xgb|mlp|both")
 
     # Validation metric per model
-    val_metric = {spec["name"]: "logloss" for spec in model_specs}
+    val_metric = {spec["name"]: "cross_entropy" for spec in model_specs}
+    val_metric = {name:metric for name, metric in val_metric.items() if any(spec["name"]==name for spec in model_specs)}
 
     # Training levels (successive halving caps)
     n_rows = len(train_val_df)
+    # training_levels = [
+    #     {"name": "L1-fast",   "epochs": 200,  "data_cap": int(n_rows * 0.50)},
+    #     {"name": "L2-medium", "epochs": 200,  "data_cap": int(n_rows * 0.75)},
+    #     {"name": "L3-full",   "epochs": 400, "data_cap": None},
+    # ]
+
     training_levels = [
-        {"name": "L1-fast",   "epochs": 250,  "data_cap": int(n_rows * 0.50)},
-        {"name": "L2-medium", "epochs": 500,  "data_cap": int(n_rows * 0.75)},
-        {"name": "L3-full",   "epochs": 2000, "data_cap": None},
+        # {"name": "L1-fast",   "epochs": 15,  "data_cap": int(n_rows * 0.50)},
+        {"name": "L3-full",   "epochs": 30, "data_cap": None},
     ]
 
     # ---------- Run search ----------
@@ -258,16 +270,16 @@ def main() -> None:
         model_specs=model_specs,
         data=train_val_df,
         standardize=stand_cols,
-        result_csv=str(args.result_csv)+f"_{args.models}_{args.technologies}_{args.initial_state}"+".csv",
+        result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.technologies}_{args.initial_state}"+".csv",
         train_ratio=1.0 - args.val_frac,
         val_ratio=args.val_frac,
         val_metric_per_model=val_metric,
         levels=training_levels,
         top_keep_ratio=args.top_keep,
-        resume=args.reuse_results
+        resume=args.reuse_results,
+        reweight_train_data_density='Temperature'
         # seed=args.seed,  # if supported by your helper
     )
-
 
     # ---------- Summarize results ----------
     print("\n=== Global winner ===")
