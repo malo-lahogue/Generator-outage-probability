@@ -1432,7 +1432,7 @@ class MLP(GeneratorFailureProbabilityInference):
             stand_targets = list(self.target_cols)  # all will be inverse-transformed
         elif isinstance(self.standardize, list) and self.scaler_feature is not None:
             stand_feat = [c for c in self.feature_cols if c in self.standardize and c in X_df.columns]
-            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat].to_numpy())
+            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat])
             stand_targets = [c for c in self.target_cols if c in self.standardize]
         else:
             stand_targets = []
@@ -2036,7 +2036,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             stand_targets = list(self.target_cols)
         elif isinstance(self.standardize, list) and self.scaler_feature is not None:
             stand_feat = [c for c in self.feature_cols if c in self.standardize and c in X_df.columns]
-            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat].to_numpy())
+            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat])
             stand_targets = [c for c in self.target_cols if c in self.standardize]
         else:
             stand_targets = []
