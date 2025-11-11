@@ -69,6 +69,7 @@ def preprocess_data(
     technology_filter: List[str] = None,
     state_one_hot: bool = True,
     technology_one_hot: bool = True,
+    state_filter:str='all',
     cyclic_features: List[str] = None,
     dropNA: bool = True,
     feature_na_drop_threshold: float = 0.2,
@@ -137,6 +138,9 @@ def preprocess_data(
     
     if initial_MC_state_filter != 'all':
         failure_df = failure_df.loc[failure_df['Initial_gen_state'] == initial_MC_state_filter].copy()
+
+    if state_filter != 'all':
+        failure_df = failure_df.loc[failure_df['State'] == state_filter.upper()].copy()
     
 
 
@@ -216,18 +220,21 @@ def preprocess_data(
 
     # ----------- State encoding ------------
     if 'State' in merged_data.columns:
-        if state_one_hot:
-            merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
-            if "State" in feature_names:
-                feature_names.remove("State")
-            feature_names += [c for c in merged_data.columns if c.startswith("State_")]
+        if state_filter != 'all':
+            feature_names.remove('State')
         else:
-            if "State" not in feature_names:
-                feature_names.append("State")
-            if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
-                cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
-                merged_data["State"] = merged_data["State"].map(cats)
-                integer_encoding["States"] = cats
+            if state_one_hot:
+                merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
+                if "State" in feature_names:
+                    feature_names.remove("State")
+                feature_names += [c for c in merged_data.columns if c.startswith("State_")]
+            else:
+                if "State" not in feature_names:
+                    feature_names.append("State")
+                if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
+                    cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
+                    merged_data["State"] = merged_data["State"].map(cats)
+                    integer_encoding["States"] = cats
 
     # ------------ Technology encodding ------------
     if technology_one_hot and "Technology" in merged_data.columns:
