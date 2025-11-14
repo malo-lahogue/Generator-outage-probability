@@ -910,12 +910,17 @@ class OptSurrogateDataset(Dataset):
 
 class EarlyStopper:
     """
-    Stop only when BOTH conditions hold:
-      • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
-      • Flat-window: variability in last `flat_patience` epochs <= flat_delta (abs or relative).
-    Guardrails:
-      • Optional max_bad_epochs (hard cap).
+    Stop only when BOTH:
+      • No improvement for `patience` epochs, AND
+      • Loss variation over last `flat_patience` ≤ flat_delta (or ≤ rel_flat * |best|)
+
+    Optional guard:
+      • max_bad_epochs: hard cap of consecutive non-improving epochs
+
+    Notes:
+      flat_delta=None disables flat-check entirely.
     """
+
     def __init__(self,
                  min_delta: float = 0.0,
                  patience: int = 15,
@@ -923,67 +928,108 @@ class EarlyStopper:
                  # flat-window
                  flat_delta: float | None = None,
                  flat_patience: int | None = None,
-                 flat_mode: str = "iqr",          # "iqr" is robust
-                 rel_flat: float | None = 2e-3,   # e.g., 0.2% of |best|; None to disable
+                 flat_mode: str = "iqr",
+                 rel_flat: float | None = 2e-3,   # fraction of |best|, ignored if flat_delta=None
                  # guardrail
                  max_bad_epochs: int | None = None):
+
         self.min_delta = float(min_delta)
         self.patience = int(patience)
         self.burn_in = int(burn_in)
+
         self.flat_delta = flat_delta
         self.flat_patience = int(flat_patience or patience)
         self.flat_mode = flat_mode
         self.rel_flat = rel_flat
+
         self.max_bad_epochs = max_bad_epochs
 
         self.best = np.inf
         self.best_state = None
         self.epoch = 0
         self.epochs_since_best = 0
+
         self.window = deque(maxlen=self.flat_patience)
         self.stop_reason = None
 
+    # ---------------------------------------------------
     def _flat_metric(self, arr):
         if self.flat_mode == "iqr":
             q75, q25 = np.percentile(arr, [75, 25])
             return float(q75 - q25)
-        return float(np.max(arr) - np.min(arr))  # range
+        return float(np.max(arr) - np.min(arr))
 
+    # ---------------------------------------------------
     def step(self, val_loss: float, model=None):
+        """Return True if should stop."""
         self.epoch += 1
         self.window.append(val_loss)
 
+        # Improvement?
         improved = val_loss < (self.best - self.min_delta)
         if improved:
             self.best = val_loss
             self.epochs_since_best = 0
+
             if model is not None:
-                self.best_state = {k: v.detach().cpu().clone()
-                                   for k, v in model.state_dict().items()}
+                # store CPU copy of best weights
+                self.best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
         else:
             self.epochs_since_best += 1
 
+        # Burn-in: never stop before this
         if self.epoch < self.burn_in:
             return False
 
-        if self.max_bad_epochs is not None and self.epochs_since_best >= self.max_bad_epochs:
-            self.stop_reason = f"max_bad_epochs {self.epochs_since_best} ≥ {self.max_bad_epochs}"
+        # Hard guardrail
+        if self.max_bad_epochs is not None and \
+           self.epochs_since_best >= self.max_bad_epochs:
+            self.stop_reason = (
+                f"Reached max_bad_epochs "
+                f"({self.epochs_since_best} ≥ {self.max_bad_epochs})"
+            )
             return True
 
-        if (self.epochs_since_best >= self.patience and
-            self.flat_delta is not None and
-            len(self.window) == self.window.maxlen):
+        # Need patience before checking flatness
+        if self.epochs_since_best < self.patience:
+            return False
 
-            thr = self.flat_delta
-            if self.rel_flat is not None:
-                thr = max(thr or 0.0, self.rel_flat * max(1e-12, abs(self.best)))
+        # If user disabled flat-window checking
+        if self.flat_delta is None:
+            self.stop_reason = (
+                f"No improvement for patience={self.patience} epochs"
+            )
+            return True
 
-            fluct = self._flat_metric(list(self.window))
-            if fluct <= thr:
-                self.stop_reason = (f"AND stop: no-improve {self.epochs_since_best} ≥ {self.patience} "
-                                    f"AND flat-window {self.flat_mode}={fluct:.3e} ≤ {thr:.3e}")
-                return True
+        # Need full window
+        if len(self.window) < self.window.maxlen:
+            return False
+
+        # Compute threshold
+        thr = self.flat_delta
+        if self.rel_flat is not None and np.isfinite(self.best):
+            thr = max(thr, self.rel_flat * max(1e-12, abs(self.best)))
+
+        fluct = self._flat_metric(list(self.window))
+
+        if fluct <= thr:
+            self.stop_reason = (
+                f"AND stop: no-improve {self.epochs_since_best} ≥ {self.patience}, "
+                f"flat-window {self.flat_mode}={fluct:.3e} ≤ {thr:.3e}"
+            )
+            return True
+
         return False
+
+    # ---------------------------------------------------
+    def get_best_state(self):
+        """Return a dict of best weights (CPU)."""
+        return self.best_state
+
+
+
 
 
 class MLP(GeneratorFailureProbabilityInference):
