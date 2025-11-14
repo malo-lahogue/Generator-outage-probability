@@ -47,10 +47,6 @@ import xgboost as xgb
 
 
 
-
-
-
-
 # Set seed for reproducibility
 # np.random.seed(0)
 torch.manual_seed(0)
@@ -58,429 +54,66 @@ torch.manual_seed(0)
 
 
 
-
-
-def preprocess_data(
-    failure_data_path: str,
-    weather_data_path: str,
-    power_load_data_path: str,
-    feature_names: List[str],
-    initial_MC_state_filter: str = 'all',
-    technology_filter: List[str] = None,
-    state_one_hot: bool = True,
-    technology_one_hot: bool = True,
-    state_filter:str='all',
-    cyclic_features: List[str] = None,
-    dropNA: bool = True,
-    feature_na_drop_threshold: float = 0.2,
-    test_periods: List[Tuple[pd.Timestamp, pd.Timestamp]] = None,
-    seed: Optional[int] = 42,
-    keep_initial_state: bool = False,
-    reweight_train_data_density=False
-) -> Tuple[pd.DataFrame, List[str], List[str], Dict[str, Dict[str, int]]]:
-    """
-    Preprocess and merge generator failure, weather, and power-load datasets at daily, state-level resolution.
-
-    Steps:
-    1. Loads failure data, weather data, and power load data from CSV files.
-    2. Normalizes time and state formats, applies optional filters on technology and initial MC state.
-    3. Selects only specified feature columns that exist and drops any with too many NaNs.
-    4. Merges datasets on (Datetime_UTC, State), handling calendar normalization and optional NaN row dropping.
-    5. Optionally one-hot encodes states and cyclically encodes seasonal/calendar features.
-    6. Encodes categorical columns (e.g., Technology, Final_gen_state) as integers.
-    7. Constructs model-ready features and targets (with optional clustering logic if extended).
-    8. Returns a clean float64 dataframe ready for ML input.
-
-    Parameters:
-        failure_data_path (str): Path to the unit-level failure data CSV.
-        weather_data_path (str): Path to the per-state daily weather data CSV.
-        power_load_data_path (str): Path to the per-state daily power load data CSV.
-        feature_names (List[str]): Feature columns to retain from weather/power-load datasets.
-        initial_MC_state_filter (str): If not 'all', filters failure data to rows with this initial MC state.
-        technology_filter (List[str], optional): Filter to only keep specific technologies.
-        state_one_hot (bool): Whether to one-hot encode 'State'. If False, use numeric codes.
-        cyclic_features (List[str], optional): Calendar features (e.g., 'Month') to encode as sine/cosine.
-        dropNA (bool): Whether to drop rows with any missing features after merging.
-        feature_na_drop_threshold (float): Threshold above which feature columns are dropped due to NaNs.
-        sort_by_date (bool): Reserved for future use (not applied in current code).
-        seed (int, optional): Random seed for deterministic operations (e.g., clustering).
-
-    Returns:
-        merged_df (pd.DataFrame): Final processed dataset with all selected features and target(s).
-        final_feature_names (List[str]): List of usable feature columns after expansion/encoding.
-        target_columns (List[str]): List of target column names.
-        integer_encoding (Dict[str, Dict[str, int]]): Dictionary mapping original string labels to integer codes
-            for categorical columns (e.g., 'State', 'Technology', 'Final_gen_state').
-    """
-
-
-    # rng = np.random.default_rng(seed if seed is not None else None)
-
-    cyclic_features = list(cyclic_features or [])
-    feature_names = list([(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in feature_names])  # defensive copy
-
-    integer_encoding = {}
-
-    # ---------- Load base tables ----------
-    # failure data
-    failure_df = pd.read_csv(failure_data_path, parse_dates=["Datetime_UTC"])
-    failure_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in failure_df.columns]
-    if 'Geographical State' in failure_df.columns:
-        failure_df.rename(columns={'Geographical State': 'State'}, inplace=True)
-    if 'Count' in failure_df.columns:
-        failure_df.rename(columns={'Count': 'Data_weight'}, inplace=True)
-    else:
-        failure_df['Data_weight'] = 1.0
-    failure_df['State'] = failure_df['State'].str.upper()
-
-    if technology_filter is not None:
-        failure_df = failure_df[failure_df['Technology'].isin(technology_filter)].copy()
-    
-    if initial_MC_state_filter != 'all':
-        failure_df = failure_df.loc[failure_df['Initial_gen_state'] == initial_MC_state_filter].copy()
-
-    if state_filter != 'all':
-        failure_df = failure_df.loc[failure_df['State'] == state_filter.upper()].copy()
-    
-
-
-
-    # --  Weather data --
-    weather_df = pd.read_csv(weather_data_path, index_col=["datetime", "state"], parse_dates=["datetime"], usecols=lambda col: col not in ["Unnamed: 0"])
-    weather_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in weather_df.columns]
-    # Ensure index level names and normalize state codes
-    if isinstance(weather_df.index, pd.MultiIndex) and len(weather_df.index.names) >= 2:
-        dt_vals = pd.to_datetime(weather_df.index.get_level_values(0))
-        st_vals = weather_df.index.get_level_values(1).astype(str).str.upper()
-        weather_df.index = pd.MultiIndex.from_arrays([dt_vals, st_vals], names=["Datetime_UTC", "State"])
-    weather_df = weather_df.reset_index()
-    dt = pd.to_datetime(weather_df['Datetime_UTC'])
-    if getattr(dt.dt, "tz", None) is None:
-        dt = dt.dt.tz_localize('UTC')
-    else:
-        dt = dt.dt.tz_convert('UTC')
-    weather_df['Datetime_UTC'] = dt
-    weather_df = weather_df.set_index(['Datetime_UTC', 'State'])
-    
-
-
-    keep_weather_features = (set(feature_names) & set(weather_df.columns)) - {"Datetime", "State"} # keep requested features that exist in weather_df, excluding index names
-    weather_df = weather_df[list(sorted(keep_weather_features))].copy()
-
-    # drop weather cols with too many NaNs
-    na_frac = weather_df.isna().mean()
-    drop_cols = list(set(na_frac[na_frac > feature_na_drop_threshold].index.tolist())-{"Heat_index", "Wind_chill"})
-    if drop_cols:
-        print(f"Dropping weather columns with >{np.around(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
-        weather_df.drop(columns=drop_cols, inplace=True)
-        feature_names = [f for f in feature_names if f not in drop_cols]
-    # Keep heat index and wind chill even if they NaNs, as they are not defined for all conditions
-    for col in ["Heat_index", "Wind_chill"]:
-        if col in weather_df.columns and col in feature_names:
-            weather_df[col + "_isnan"] = weather_df[col].isna().astype(np.float32) # add isnan indicator
-            feature_names.append(col + "_isnan")
-            weather_df[col] = weather_df[col].fillna(0.0)  # fill NaNs with 0.0 for avoiding issues later
-
-    # -- Power Load data --
-    power_load_df = pd.read_csv(power_load_data_path, index_col=["UTC time", "State"], parse_dates=["UTC time"], usecols=lambda col: col not in ["Unnamed: 0"])
-    power_load_df.columns = [(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in power_load_df.columns]
-    # Ensure index level names and normalize state codes
-    if isinstance(power_load_df.index, pd.MultiIndex) and len(power_load_df.index.names) >= 2:
-        dt_vals = pd.to_datetime(power_load_df.index.get_level_values(0))
-        st_vals = power_load_df.index.get_level_values(1).astype(str).str.upper()
-        power_load_df.index = pd.MultiIndex.from_arrays([dt_vals, st_vals], names=["Datetime_UTC", "State"])
-    keep_power_features = set(feature_names) & set(power_load_df.columns)
-    power_load_df = power_load_df[list(sorted(keep_power_features))].copy()
-
-    na_frac = power_load_df.isna().mean()
-    drop_cols = na_frac[na_frac > feature_na_drop_threshold].index.tolist()
-    if drop_cols:
-        print(f"Dropping power load columns with >{np.around(feature_na_drop_threshold*100)}% NaN: {drop_cols}")
-        power_load_df.drop(columns=drop_cols, inplace=True)
-        feature_names = [f for f in feature_names if f not in drop_cols]
-
-
-
-    #  ---------- Merge ----------
-    merged_data = failure_df.join(weather_df, how='left', on=['Datetime_UTC', 'State'])
-    merged_data = merged_data.join(power_load_df, how='left', on=['Datetime_UTC', 'State'])
-
-    if dropNA:
-        merged_data.dropna(inplace=True)
-
-    merged_data.reset_index(drop=True, inplace=True)
-
-    # --------- Drop unecessary features and group -------
-    feat_keep = feature_names + ['Datetime_UTC', 'Final_gen_state']
-    if keep_initial_state:
-        feat_keep.append('Initial_gen_state') 
-    feat_keep = [f for f in feat_keep if f in merged_data.columns]
-    merged_data = merged_data[feat_keep+['Data_weight']].copy()
-    merged_data = merged_data.groupby(feat_keep).sum('Data_weight').reset_index()
-
-    # ----------- State encoding ------------
-    if 'State' in merged_data.columns:
-        if state_filter != 'all':
-            feature_names.remove('State')
-        else:
-            if state_one_hot:
-                merged_data = pd.get_dummies(merged_data, columns=["State"], drop_first=False, dtype=int)
-                if "State" in feature_names:
-                    feature_names.remove("State")
-                feature_names += [c for c in merged_data.columns if c.startswith("State_")]
-            else:
-                if "State" not in feature_names:
-                    feature_names.append("State")
-                if isinstance(merged_data.iloc[0]["State"], str): # convert to categorical codes
-                    cats = {s: i for i, s in enumerate(np.sort(merged_data["State"].unique()))}
-                    merged_data["State"] = merged_data["State"].map(cats)
-                    integer_encoding["States"] = cats
-
-    # ------------ Technology encodding ------------
-    if technology_one_hot and "Technology" in merged_data.columns:
-        merged_data = pd.get_dummies(merged_data, columns=["Technology"], drop_first=False, dtype=int)
-        if "Technology" in feature_names:
-            feature_names.remove("Technology")
-        feature_names += [c for c in merged_data.columns if c.startswith("Technology_")]
-    elif "Technology" in merged_data.columns:
-        if "Technology" not in feature_names:
-            feature_names.append("Technology")
-        if isinstance(merged_data.iloc[0]["Technology"], str): # convert to categorical codes
-            cats = {s: i for i, s in enumerate(np.sort(merged_data["Technology"].unique()))}
-            merged_data["Technology"] = merged_data["Technology"].map(cats)
-            integer_encoding['Technologies'] = cats
-
-
-
-    # ---------- Calendar features ----------
-
-    if "Season" in feature_names:
-        def get_season(ts: pd.Timestamp) -> float:
-            Y = ts.year
-            seasons = {
-                0.0: (pd.Timestamp(f"{Y}-03-20", tz="UTC"), pd.Timestamp(f"{Y}-06-20", tz="UTC")),  # Spring
-                1.0: (pd.Timestamp(f"{Y}-06-21", tz="UTC"), pd.Timestamp(f"{Y}-09-22", tz="UTC")),  # Summer
-                2.0: (pd.Timestamp(f"{Y}-09-23", tz="UTC"), pd.Timestamp(f"{Y}-12-20", tz="UTC")),  # Autumn
-                3.0: (pd.Timestamp(f"{Y}-12-21", tz="UTC"), pd.Timestamp(f"{Y+1}-03-19", tz="UTC")),  # Winter
-            }
-            for s, (start, end) in seasons.items():
-                if start <= ts <= end:
-                    return s
-            return 3.0  # Jan–Mar before Mar 20
-        merged_data["Season"]   = merged_data["Datetime_UTC"].apply(get_season)
-    if "Month" in feature_names:
-        merged_data["Month"]   = merged_data["Datetime_UTC"].dt.month
-    if "DayOfWeek" in feature_names:
-        merged_data["DayOfWeek"]   = merged_data["Datetime_UTC"].dt.dayofweek
-    if "DayOfYear" in feature_names:
-        merged_data["DayOfYear"]   = merged_data["Datetime_UTC"].dt.dayofyear
-    if "Holiday" in feature_names:
-        cal = USFederalHolidayCalendar()
-        holidays = cal.holidays(start=merged_data["Datetime_UTC"].min(), end=merged_data["Datetime_UTC"].max())
-        merged_data["Holiday"]   = merged_data["Datetime_UTC"].isin(holidays)
-    if "Weekend" in feature_names:
-        merged_data["Weekend"]   = merged_data["Datetime_UTC"].dt.weekday >= 5
-
-
-    # ---------- Target construction ----------
-    target_columns = ['Final_gen_state']
-    if isinstance(merged_data.iloc[0]["Final_gen_state"], str): # convert to categorical codes
-        cats = {s: i for i, s in enumerate(np.sort(merged_data["Final_gen_state"].unique()))}
-        merged_data["Final_gen_state"] = merged_data["Final_gen_state"].map(cats)
-        integer_encoding['Final_gen_state'] = cats
-
-
-
-    # ---------- Cyclic feature encoding ----------
-    for feat in list(cyclic_features):
-        if feat not in merged_data.columns:
-            # skip quietly if not present
-            continue
-        series = merged_data[feat]
-        min_val, max_val = series.min(), series.max()
-        if pd.isna(min_val) or pd.isna(max_val) or max_val == min_val:
-            # degenerate: encode as 0/1 constant vectors
-            merged_data[f"{feat}_sin"] = 0.0
-            merged_data[f"{feat}_cos"] = 1.0
-        else:
-            phase = 2.0 * np.pi * (series - min_val) / (max_val - min_val)
-            merged_data[f"{feat}_sin"] = np.sin(phase)
-            merged_data[f"{feat}_cos"] = np.cos(phase)
-        if feat in feature_names:
-            feature_names.remove(feat)
-        feature_names += [f"{feat}_sin", f"{feat}_cos"]
-        merged_data.drop(columns=[feat], inplace=True, errors="ignore")
-
-
-    # ---------- Final column selection ----------
-    feature_names = list(set(feature_names).intersection(merged_data.columns))
-    cols = feature_names + target_columns + ["Data_weight"]
-
-    for col in cols:
-        if col not in merged_data.columns:
-            raise KeyError(f"Expected column '{col}' not found in merged data.")
-
-    # --- ensure target columns are integer-encoded ---
-    for tcol in target_columns:
-        merged_data[tcol] = merged_data[tcol].astype(np.int32)
-
-    # Use float64 consistently for features (you can switch to float32 if desired)
-    for fcol in feature_names:
-        merged_data[fcol] = merged_data[fcol].astype(np.float32)
-
-    merged_data["Data_weight"] = merged_data["Data_weight"].astype(np.float64)
-
-    merged_df = merged_data.sort_values(by="Datetime_UTC").reset_index(drop=True)
-
-    # ---------- Separate test dataset ----------
-    if test_periods:
-        mask_test = pd.Series(False, index=merged_data.index)
-        for start_date, end_date in test_periods:
-            sd = pd.to_datetime(start_date)
-            ed = pd.to_datetime(end_date)
-            # ensure end-of-day (set to 23:59:59.999999 of the given date)
-            ed = ed.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-
-            # make timestamps timezone-aware (match merged_data which uses UTC)
-            if sd.tzinfo is None:
-                sd = sd.tz_localize('UTC')
-            if ed.tzinfo is None:
-                ed = ed.tz_localize('UTC')
-            mask = (merged_data['Datetime_UTC'] >= sd) & (merged_data['Datetime_UTC'] <= ed)
-            mask_test |= mask
-        test_df = merged_data.loc[mask_test].copy().reset_index(drop=True)
-        train_val_df = merged_data.loc[~mask_test].copy().reset_index(drop=True)
-    else:
-        # no test periods specified -> empty test set, all data for train/val
-        test_df = merged_data.iloc[0:0].copy().reset_index(drop=True)
-        train_val_df = merged_data.copy().reset_index(drop=True)
-    cols = ['Datetime_UTC']+cols
-    if keep_initial_state:
-        cols = ['Initial_gen_state']+cols
-    test_df = test_df[cols].copy()
-    train_val_df = train_val_df[cols].copy()
-    return train_val_df, test_df, feature_names, target_columns, integer_encoding
-    # return merged_df, feature_names, target_columns, integer_encoding
-
-
-
-class OptSurrogateDataset(Dataset):
-    """
-        Lightweight Dataset wrapper to feed ML models with (X, y, w) triples.
-
-        Supports:
-        - Tabular input: X has shape (N, D) when `feature_cols` is a flat list of column names.
-        - Simple sequence input: X has shape (N, T, D_t) when `feature_cols` is a list of lists
-        (one sublist per timestep). Same pattern for `target_cols`.
-
-        INPUTS:
-        - df (pd.DataFrame) : Source table containing features/targets and optional 'Data_weight'.
-        - feature_cols (list) : Flat list of feature names, or list-of-lists for sequences.
-        - target_cols (list) : Flat list of target names, or list-of-lists for sequences.
-
-        OUTPUTS:
-        - __len__() (int) : Number of samples.
-        - __getitem__(idx) (tuple[torch.Tensor, torch.Tensor, torch.Tensor]) :
-        (x, y, w) where x and y are float32 tensors, and w is a float32 scalar weight.
-    """
-
-    def __init__(self, df: pd.DataFrame, feature_cols: list, target_cols: list) -> None:
-        if not isinstance(df, pd.DataFrame):
-            raise TypeError("df must be a pandas DataFrame.")
-        if not feature_cols or not target_cols:
-            raise ValueError("feature_cols and target_cols must be non-empty.")
-
-        self.data = df.copy()
-
-        # ---------- build X ----------
-        if isinstance(feature_cols[0], (list, tuple)):
-            # sequence mode
-            seq_len    = len(feature_cols)          # time steps
-            input_size = len(feature_cols[0])       # features/hour
-            # sanity checks
-            if any(len(cols_t) != input_size for cols_t in feature_cols):
-                raise ValueError("All timesteps in feature_cols must have the same length.")
-            for cols_t in feature_cols:
-                missing = [c for c in cols_t if c not in self.data.columns]
-                if missing:
-                    raise KeyError(f"Missing feature columns at some timestep: {missing}")
-
-            X = np.empty((len(self.data), seq_len, input_size), dtype=np.float32)
-            for t, cols_t in enumerate(feature_cols):
-                X[:, t, :] = self.data[cols_t].to_numpy(dtype=np.float32)
-        else:
-            missing = [c for c in feature_cols if c not in self.data.columns]
-            if missing:
-                raise KeyError(f"Missing feature columns: {missing}")
-            X = self.data[feature_cols].to_numpy(dtype=np.float32)
-        self.X = X
-
-        # ---------- build y ----------
-        if isinstance(target_cols[0], (list, tuple)):
-            seq_len = len(target_cols)
-            out_size = len(target_cols[0]) * (self.num_classes if self.num_classes else 1)
-            if any(len(cols_t) != out_size for cols_t in target_cols):
-                raise ValueError("All timesteps in target_cols must have the same length.")
-            for cols_t in target_cols:
-                missing = [c for c in cols_t if c not in self.data.columns]
-                if missing:
-                    raise KeyError(f"Missing target columns at some timestep: {missing}")
-
-            Y = np.empty((len(self.data), seq_len, out_size), dtype=np.int64)
-            for t, cols_t in enumerate(target_cols):
-                Y[:, t, :] = self.data[cols_t].to_numpy(dtype=np.int64)
-        else:
-            missing = [c for c in target_cols if c not in self.data.columns]
-            if missing:
-                raise KeyError(f"Missing target columns: {missing}")
-            Y = self.data[target_cols].to_numpy(dtype=np.int64).flatten()
-        self.y = Y
-
-        # ---------- optional weights ----------
-        if "Data_weight" in self.data.columns:
-            w = self.data["Data_weight"].to_numpy(dtype=np.float32)
-        else:
-            w = np.ones(len(self.data), dtype=np.float32)
-        self.train_weights = w
-
-    def __len__(self) -> int:
-        return len(self.X)
-
-    def __getitem__(self, idx: int):
-        x = torch.as_tensor(self.X[idx], dtype=torch.float32)
-        y_np = self.y[idx]
-        if isinstance(y_np, np.ndarray):
-            y_np = np.squeeze(y_np)
-            if y_np.ndim != 0:
-                raise ValueError(f"Cross-entropy expects a single class index per sample; got shape {y_np.shape}")
-        y = torch.as_tensor(int(y_np), dtype=torch.int64)  # scalar
-        w = torch.as_tensor(self.train_weights[idx], dtype=torch.float32)
-        return x, y, w
-
-
-
 class GeneratorFailureProbabilityInference:
     """
-        Base class providing common data prep, standardization, plotting helpers, and
-        save/load utilities for surrogate models (e.g., MLP, XGBoost).
+    Base class providing common data preparation, standardization, plotting helpers,
+    and save/load utilities for surrogate models (e.g., MLP, XGBoost).
 
-        Typical flow:
-        1) Subclass builds a model and sets `self.feature_cols` and `self.target_cols`.
-        2) Call `prepare_data(...)` to split and (optionally) standardize.
-        3) Call subclass `train_model(...)`.
-        4) Call subclass `predict(X)`.
+    Typical workflow
+    ----------------
+    1) Subclass builds a model and sets `self.feature_cols` and `self.target_cols`.
+    2) Call `prepare_data(...)` to split and (optionally) standardize.
+    3) Call subclass `train_model(...)`.
+    4) Call subclass `predict(X)`.
 
-        INPUTS (constructor):
-        - verbose (bool) : If True, print informational logs.
-
-        OUTPUTS:
-        - None : Holds `self.model`, `self.val_loss`, and dataset splits.
+    Attributes set by `prepare_data`
+    --------------------------------
+    - dataset_df : pd.DataFrame
+        Full dataset copy after any reweighting / standardization.
+    - train_data, val_data
+        Either pandas DataFrames or torch Datasets (for MLP).
+    - _train_idx, _val_idx : list[int]
+        Indices used for the train/val split.
+    - scaler_feature : StandardScaler | None
+        Feature scaler (if standardization was requested).
+    - scaler_target : StandardScaler | None
+        Target scaler (only for continuous/regression targets).
+    - standardize : bool | list[str]
+        Standardization config passed in.
+    - train_ratio, val_ratio : float
+        Ratios used for splitting.
     """
 
     def __init__(self, verbose: bool = True) -> None:
         self.verbose = verbose
+
+        # model & training state
         self.model: Optional[object] = None
         self.val_loss: list[float] = []
+
+        # data-related attributes
+        self.dataset_df: Optional[pd.DataFrame] = None
+        self.train_data = None
+        self.val_data = None
+        self._train_idx: Optional[list[int]] = None
+        self._val_idx: Optional[list[int]] = None
+
+        # column specs (must be set by subclasses before prepare_data)
+        self.feature_cols: Optional[Sequence[str]] = None
+        self.target_cols: Optional[Sequence[str]] = None
+
+        # standardization state
+        self.scaler_feature: Optional[StandardScaler] = None
+        self.scaler_target: Optional[StandardScaler] = None
+        self.standardize: Union[bool, list[str]] = False
+
+        # split ratios
+        self.train_ratio: float = 0.0
+        self.val_ratio: float = 0.0
+
+    # -------------------------------------------------------------------------
+    # Data preparation
+    # -------------------------------------------------------------------------
 
     def prepare_data(
         self,
@@ -489,25 +122,54 @@ class GeneratorFailureProbabilityInference:
         val_ratio: float = 0.2,
         standardize: Union[bool, list[str]] = False,
         reweight_train_data_density: bool | str = False,
+        seed: int = 42,
     ) -> None:
         """
         Split data into train/val (no test here), optionally standardize, and reweight samples.
 
-        Args:
-            data (pd.DataFrame): Input full dataset with features, targets, and optional 'Data_weight'.
-            train_ratio (float): Proportion of data to allocate to training.
-            val_ratio (float): Proportion to allocate to validation.
-            standardize (bool | list[str]): Whether/which columns to standardize.
-            reweight_train_data_density (bool | str): If str, must be column name to reweight by density.
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Full dataset with features, targets, and optionally 'Data_weight'.
+        train_ratio : float
+            Proportion of data allocated to training.
+        val_ratio : float
+            Proportion allocated to validation.
+            Note: train_ratio + val_ratio must be <= 1.0.
+        standardize : bool | list[str]
+            If True:
+                - Standardize all feature columns in `self.feature_cols`.
+                - Standardize continuous (non-integer) target columns in `self.target_cols`.
+            If list[str]:
+                - Standardize only those columns (among features/targets) whose names
+                  are in the list and exist in `data`.
+            If False:
+                - No standardization is applied.
+        reweight_train_data_density : bool | str
+            If False:
+                - No density-based reweighting.
+            If str:
+                - Name of a numeric column used for 1/density reweighting on the
+                  *training* portion via KernelDensity.
+        seed : int
+            Random seed for data shuffling/splitting.
 
-        Returns:
-            None. Sets self.train_data, self.val_data, etc.
+        Side effects
+        ------------
+        Sets:
+            - self.dataset_df
+            - self.train_data, self.val_data
+            - self._train_idx, self._val_idx
+            - self.scaler_feature, self.scaler_target
+            - self.standardize, self.train_ratio, self.val_ratio
         """
-        # --- guards ---
+        # --- guards on required attributes ---
         for attr in ("feature_cols", "target_cols"):
             if not hasattr(self, attr) or getattr(self, attr) is None:
-                raise AttributeError(f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set.")
-
+                raise AttributeError(
+                    f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set "
+                    "(usually done in build_model)."
+                )
 
         if any(r < 0 for r in (train_ratio, val_ratio)):
             raise ValueError("train_ratio and val_ratio must be non-negative.")
@@ -515,183 +177,211 @@ class GeneratorFailureProbabilityInference:
             raise ValueError("train_ratio + val_ratio must be ≤ 1.0.")
 
         # --- clone dataset and store config ---
-        self.dataset_df = data.copy()
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
+        ds = data.copy()
+        self.dataset_df = ds
+        self.train_ratio = float(train_ratio)
+        self.val_ratio = float(val_ratio)
         self.standardize = standardize
 
-        ds = self.dataset_df
         N = len(ds)
 
-        # --- deterministic split ---
+        # --- deterministic split (random permutation, fixed seed) ---
         if train_ratio + val_ratio == 0:
+            # degenerate case: everything to "train", none to "val"
             train_size = N
             val_size = 0
         else:
-            train_size = int(round(N * (train_ratio / (train_ratio + val_ratio))))
+            frac = train_ratio / max(train_ratio + val_ratio, 1e-12)
+            train_size = int(round(N * frac))
             val_size = N - train_size
 
-        rng = torch.Generator().manual_seed(42)
+        rng = torch.Generator().manual_seed(seed)
         perm = torch.randperm(N, generator=rng).tolist()
-        self._train_idx = train_idx = perm[:train_size]
-        self._val_idx = val_idx = perm[train_size:train_size + val_size]
+        train_idx = perm[:train_size]
+        val_idx = perm[train_size:train_size + val_size]
 
-        # --- reweight data if requested ---
+        self._train_idx = train_idx
+        self._val_idx = val_idx
+
+        # --- optional density-based reweighting on training data ---
         if reweight_train_data_density:
             if not isinstance(reweight_train_data_density, str):
-                raise ValueError("'reweight_train_data_density' must be False or a column name.")
+                raise ValueError(
+                    "'reweight_train_data_density' must be False or a column name (str)."
+                )
             col = reweight_train_data_density
+            if col not in ds.columns:
+                raise KeyError(
+                    f"Column '{col}' not found in data for density reweighting."
+                )
+
+            print(f"Reweighting training data by 1/density of column '{col}'...")
+
             X = ds.iloc[train_idx][[col]].to_numpy()
 
-            # KDE over training column
-            bandwidth = max((X.max() - X.min()) / 10, 1e-6)
-            kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(X)
+            # simple heuristic bandwidth (avoid 0)
+            bw = max((X.max() - X.min()) / 10.0, 1e-6)
+            kde = KernelDensity(kernel="gaussian", bandwidth=bw).fit(X)
 
-            # Build interpolation grid for smooth weighting
+            # grid for interpolation
             X_grid = np.quantile(X.flatten(), np.linspace(0, 1, 100)).reshape(-1, 1)
             log_dens = kde.score_samples(X_grid)
             density = np.exp(log_dens)
 
-            # Interpolate density at training points
             raw_vals = X.flatten()
             interp_dens = np.interp(raw_vals, X_grid.flatten(), density)
             interp_weights = 1.0 / (interp_dens + 1e-10)
             interp_weights /= np.mean(interp_weights)
 
-            # Apply weights
-            if 'Data_weight' not in ds.columns:
-                ds['Data_weight'] = 1.0
-            ds.loc[train_idx, 'Data_weight'] *= interp_weights
+            if "Data_weight" not in ds.columns:
+                ds["Data_weight"] = 1.0
+            ds.loc[train_idx, "Data_weight"] = (
+                ds.loc[train_idx, "Data_weight"].to_numpy() * interp_weights
+            )
 
-        # --- standardization ---
+        # --- standardization setup ---
         self.scaler_feature = None
         self.scaler_target = None
+
         if standardize is True or isinstance(standardize, list):
             self.scaler_feature = StandardScaler()
             self.scaler_target = StandardScaler()
 
+            present_cols = set(ds.columns)
+
+            # which features to standardize
             if standardize is True:
-                stand_features = list(self.feature_cols)
-                stand_targets = list(self.target_cols)
+                stand_features = [
+                    f for f in self.feature_cols if f in present_cols  # type: ignore[arg-type]
+                ]
             else:
-                present = set(ds.columns)
-                stand_features = [f for f in self.feature_cols if f in standardize and f in present]
-                stand_targets = [t for t in self.target_cols if t in standardize and t in present]
+                stand_features = [
+                    f for f in self.feature_cols  # type: ignore[arg-type]
+                    if f in standardize and f in present_cols
+                ]
 
+            # which targets to standardize (only continuous / non-integer)
+            if standardize is True:
+                candidate_targets = [
+                    t for t in self.target_cols  # type: ignore[arg-type]
+                    if t in present_cols
+                ]
+            else:
+                candidate_targets = [
+                    t for t in self.target_cols  # type: ignore[arg-type]
+                    if t in standardize and t in present_cols
+                ]
+
+            stand_targets: list[str] = []
+            for t in candidate_targets:
+                # treat integer-typed columns as class labels -> do NOT standardize
+                if np.issubdtype(ds[t].dtype, np.integer):
+                    continue
+                stand_targets.append(t)
+
+            # fit on training slice only (to avoid leakage)
             if stand_features:
-                ds.loc[:, stand_features] = self.scaler_feature.fit_transform(ds[stand_features])
+                self.scaler_feature.fit(ds.iloc[train_idx][stand_features])
+                ds.loc[:, stand_features] = self.scaler_feature.transform(ds[stand_features])
             if stand_targets:
-                ds.loc[:, stand_targets] = self.scaler_target.fit_transform(ds[stand_targets])
+                self.scaler_target.fit(ds.iloc[train_idx][stand_targets])
+                ds.loc[:, stand_targets] = self.scaler_target.transform(ds[stand_targets])
+            else:
+                # if we never standardize targets, keep scaler_target = None to avoid misuse
+                self.scaler_target = None
 
-        # --- construct datasets ---
+            # persist standardized dataset
+            self.dataset_df = ds
+
+        # --- construct train / val splits ---
         if self.__class__.__name__ == "MLP":
-            ds_torch = OptSurrogateDataset(ds, feature_cols=self.feature_cols, target_cols=self.target_cols)
+            # use torch Dataset wrapper for MLP
+            ds_torch = OptSurrogateDataset(
+                ds,
+                feature_cols=list(self.feature_cols),   # type: ignore[arg-type]
+                target_cols=list(self.target_cols),     # type: ignore[arg-type]
+            )
             self.train_data = torch.utils.data.Subset(ds_torch, train_idx)
-            self.val_data   = torch.utils.data.Subset(ds_torch, val_idx)
+            self.val_data = torch.utils.data.Subset(ds_torch, val_idx)
         else:
-            # fallback to Pandas splits (slice-based)
+            # default: pandas DataFrames
             self.train_data = ds.iloc[train_idx].reset_index(drop=True)
-            self.val_data   = ds.iloc[val_idx].reset_index(drop=True)
+            self.val_data = ds.iloc[val_idx].reset_index(drop=True)
 
-
-
-
-    # ---------------------- Plotting ----------------------
+   # -------------------------------------------------------------------------
+    # Plotting helpers
+    # -------------------------------------------------------------------------
 
     def plot_validation_loss(self, y_scale: str = "linear") -> None:
         """
         Plot the validation loss over epochs.
 
-        INPUTS:
-        - y_scale (str) : Matplotlib yscale, e.g. 'linear' or 'log'.
+        Parameters
+        ----------
+        y_scale : str
+            Matplotlib y-scale, e.g. 'linear' or 'log'.
 
-        OUTPUTS:
-        - None : Shows the plot.
+        Returns
+        -------
+        None
         """
+        if not self.val_loss:
+            raise ValueError("No validation loss recorded yet (val_loss is empty).")
+
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(self.val_loss)
         ax.set_yscale(y_scale)
-        ax.set_xlabel('Epochs')
-        ax.set_ylabel('Validation Loss')
-        ax.set_title('Validation Loss Over Epochs')
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Validation Loss")
+        ax.set_title("Validation Loss Over Epochs")
+        plt.tight_layout()
         plt.show()
-
-        # ---------------------- Plotting helpers (kept & cleaned) ----------------------
-
-    def _ensure_test_df(self, test_data: pd.DataFrame | None) -> pd.DataFrame:
-        """Internal: pick a test DataFrame and drop NaNs."""
-        if test_data is None:
-            if getattr(self, "test_data", None) is None:
-                raise ValueError("Test data not prepared. Provide test_data or call prepare_data with test_ratio>0.")
-            df = self.test_data.copy()
-        else:
-            df = test_data.copy()
-        return df.dropna()
-
-    def _y_from_any(self, split) -> np.ndarray:
-        """Internal: get y array from either a pandas DataFrame (XGB) or a torch Dataset (MLP)."""
-        if hasattr(split, "_datapipes") or isinstance(split, torch.utils.data.dataset.Dataset):
-            # torch Dataset: iterate once (small batches) and collect y
-            loader = DataLoader(split, batch_size=4096, shuffle=False)
-            ys = []
-            for batch in loader:
-                if len(batch) == 3:
-                    _, yb, _ = batch
-                else:
-                    _, yb = batch
-                ys.append(yb.detach().cpu().numpy())
-            y = np.concatenate(ys, axis=0)
-            if y.ndim > 1:
-                y = y.reshape(y.shape[0], -1)
-            return y.squeeze()
-        else:
-            # pandas split
-            y = split[self.target_cols].to_numpy()
-            if y.ndim > 1:
-                y = y.reshape(y.shape[0], -1)
-            return y.squeeze()
-
-    def _predict_from_df(self, df: pd.DataFrame) -> np.ndarray:
-        """Internal: call self.predict on DF and return flattened predictions."""
-        X_cols = list(dict.fromkeys(self.feature_cols))  # keep order, drop dups
-        X = df[X_cols]
-        y_pred = self.predict(X)
-        if y_pred.ndim > 1:
-            y_pred = y_pred.reshape(y_pred.shape[0], -1)
-        return y_pred.squeeze()
 
     def plot_train_test_split(self) -> None:
         """
         Visualize the distribution of target values in train vs test (simple strip plot).
 
-        INPUTS:
-        - None
+        Requires:
+            - self.train_data to be prepared.
+            - Optional self.test_data for the test series.
 
-        OUTPUTS:
-        - None
+        Returns
+        -------
+        None
         """
-        if not hasattr(self, "train_data"):
+        if not hasattr(self, "train_data") or self.train_data is None:
             raise ValueError("No train_data. Call prepare_data first.")
 
         y_train = self._y_from_any(self.train_data)
+
         if getattr(self, "test_data", None) is not None and len(self.test_data) > 0:
-            y_test = self.test_data[self.target_cols].to_numpy().reshape(len(self.test_data), -1).squeeze()
+            y_test = (
+                self.test_data[self.target_cols]  # type: ignore[index]
+                .to_numpy()
+                .reshape(len(self.test_data), -1)
+                .squeeze()
+            )
         else:
             y_test = np.array([])
 
         plt.figure(figsize=(7, 4))
         x_train = np.ones_like(y_train, dtype=float)
         plt.scatter(x_train, y_train, s=6, alpha=0.5, label="Train")
+
         if y_test.size > 0:
             x_test = np.ones_like(y_test, dtype=float) * 2.0
             plt.scatter(x_test, y_test, s=6, alpha=0.5, label="Test")
             plt.xticks([1, 2], ["Train", "Test"])
         else:
             plt.xticks([1], ["Train"])
+
         plt.ylabel("Target")
         plt.title("Train/Test Target Distribution")
         plt.legend()
+        plt.tight_layout()
         plt.show()
+
+    # (Not revised yet)
 
     def plot_test_samples(
         self,
@@ -1040,6 +730,183 @@ class GeneratorFailureProbabilityInference:
         plt.tight_layout()
         plt.show()
 
+
+    # ---------------------- internal helpers ----------------------
+    def _ensure_test_df(self, test_data: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """Internal: pick a test DataFrame and drop NaNs."""
+        if test_data is None:
+            if getattr(self, "test_data", None) is None:
+                raise ValueError(
+                    "Test data not prepared. Provide test_data "
+                    "or set self.test_data before calling this method."
+                )
+            df = self.test_data.copy()
+        else:
+            df = test_data.copy()
+        return df.dropna()
+
+    def _y_from_any(self, split) -> np.ndarray:
+        """
+        Internal: get a 1D y array from either:
+        - a pandas DataFrame (XGB-like models), or
+        - a torch Dataset / Subset (MLP).
+        """
+        # torch Dataset / Subset path
+        if isinstance(split, torch.utils.data.Dataset):
+            loader = DataLoader(split, batch_size=4096, shuffle=False)
+            ys = []
+            for batch in loader:
+                if len(batch) == 3:
+                    _, yb, _ = batch
+                else:
+                    _, yb = batch
+                ys.append(yb.detach().cpu().numpy())
+            y = np.concatenate(ys, axis=0)
+            if y.ndim > 1:
+                y = y.reshape(y.shape[0], -1)
+            return y.squeeze()
+
+        # pandas DataFrame path
+        if not isinstance(split, pd.DataFrame):
+            raise TypeError("split must be a torch Dataset or a pandas DataFrame.")
+        y = split[self.target_cols].to_numpy()  # type: ignore[index]
+        if y.ndim > 1:
+            y = y.reshape(y.shape[0], -1)
+        return y.squeeze()
+
+    def _predict_from_df(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Internal: call self.predict on a DataFrame and return flattened predictions.
+        """
+        if self.feature_cols is None:
+            raise AttributeError("feature_cols not set; build_model must set it first.")
+
+        X_cols = list(dict.fromkeys(self.feature_cols))  # keep order, drop dups
+        X = df[X_cols]
+        y_pred = self.predict(X)
+        if y_pred.ndim > 1:
+            y_pred = y_pred.reshape(y_pred.shape[0], -1)
+        return y_pred.squeeze()
+    
+class OptSurrogateDataset(Dataset):
+    """
+    Lightweight Dataset wrapper producing (X, y, w) triples.
+
+    Supports:
+    - Tabular features: shape (N, D)
+    - Sequence features: shape (N, T, D_t)
+    - Same for targets.
+
+    No assumptions about number of classes or regression vs classification.
+    The model controls output interpretation.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        feature_cols: Sequence[Union[str, Sequence[str]]],
+        target_cols: Sequence[Union[str, Sequence[str]]],
+    ) -> None:
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("df must be a pandas DataFrame.")
+
+        if not feature_cols or not target_cols:
+            raise ValueError("feature_cols and target_cols must be non-empty.")
+
+        # ------------------------------------------------------------
+        #                        BUILD X
+        # ------------------------------------------------------------
+        if isinstance(feature_cols[0], (list, tuple)):
+            # ---------- SEQUENCE MODE ----------
+            seq_len = len(feature_cols)
+            input_size = len(feature_cols[0])
+
+            # validate structure
+            for tcols in feature_cols:
+                if len(tcols) != input_size:
+                    raise ValueError("All timesteps in feature_cols must have the same length.")
+                missing = [c for c in tcols if c not in df.columns]
+                if missing:
+                    raise KeyError(f"Missing feature columns at timestep: {missing}")
+
+            X = np.empty((len(df), seq_len, input_size), dtype=np.float32)
+            for t, tcols in enumerate(feature_cols):
+                X[:, t, :] = df[tcols].to_numpy(dtype=np.float32)
+
+        else:
+            # ---------- TABULAR MODE ----------
+            missing = [c for c in feature_cols if c not in df.columns]
+            if missing:
+                raise KeyError(f"Missing feature columns: {missing}")
+            X = df[list(feature_cols)].to_numpy(dtype=np.float32)
+
+        self.X = X
+
+        # ------------------------------------------------------------
+        #                        BUILD y
+        # ------------------------------------------------------------
+        if isinstance(target_cols[0], (list, tuple)):
+            # ---------- SEQUENCE TARGET ----------
+            seq_len = len(target_cols)
+            out_size = len(target_cols[0])
+
+            for tcols in target_cols:
+                if len(tcols) != out_size:
+                    raise ValueError("All timesteps in target_cols must have the same length.")
+                missing = [c for c in tcols if c not in df.columns]
+                if missing:
+                    raise KeyError(f"Missing target columns at timestep: {missing}")
+
+            # dtype depends on data: int → classification, float → regression
+            sample_dtype = df[target_cols[0][0]].dtype
+            y_dtype = np.int64 if np.issubdtype(sample_dtype, np.integer) else np.float32
+
+            Y = np.empty((len(df), seq_len, out_size), dtype=y_dtype)
+            for t, tcols in enumerate(target_cols):
+                Y[:, t, :] = df[tcols].to_numpy(dtype=y_dtype)
+
+        else:
+            # ---------- TABULAR TARGET ----------
+            missing = [c for c in target_cols if c not in df.columns]
+            if missing:
+                raise KeyError(f"Missing target columns: {missing}")
+
+            sample_dtype = df[target_cols[0]].dtype
+            y_dtype = np.int64 if np.issubdtype(sample_dtype, np.integer) else np.float32
+
+            # Keep 2D shape if multi-target regression/classification
+            Y = df[list(target_cols)].to_numpy(dtype=y_dtype)
+
+        self.y = Y
+
+        # ------------------------------------------------------------
+        #                       BUILD w
+        # ------------------------------------------------------------
+        if "Data_weight" in df.columns:
+            self.train_weights = df["Data_weight"].to_numpy(dtype=np.float32)
+        else:
+            self.train_weights = np.ones(len(df), dtype=np.float32)
+
+    # ------------------------------------------------------------
+    #                 PyTorch Dataset API
+    # ------------------------------------------------------------
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        x = torch.as_tensor(self.X[idx], dtype=torch.float32)
+        y = torch.as_tensor(self.y[idx])
+
+        # maintain dtype: int64 = classification, float32 = regression
+        if y.dtype == torch.int64 and y.numel() != 1:
+            raise ValueError(
+                "Classification expects single integer label per sample. "
+                f"Got target shape {tuple(y.shape)}"
+            )
+
+        w = torch.as_tensor(self.train_weights[idx], dtype=torch.float32)
+        return x, y, w
 
 class EarlyStopper:
     """
@@ -1837,6 +1704,7 @@ class MLP(GeneratorFailureProbabilityInference):
             normalize=normalize,
             return_df=True,
         )
+        imp = imp.loc[imp["Feature"].str.startswith('State_') == False]  # exclude State_ features
         k = min(top_k, len(imp))
         plt.figure(figsize=(8, max(3.5, 0.4 * k)))
         plt.barh(imp["Feature"][:k][::-1], imp["Importance"][:k][::-1])
@@ -2443,7 +2311,8 @@ def successive_halving_search(
     warm_start: bool = False,         # if True: keep MLP weights across levels (XGB still fresh)
     verbose=False,
     model_per_state: bool = False,  # if True: save model checkpoint per state (level,candidate)
-    reweight_train_data_density=False
+    reweight_train_data_density=False,
+    seed: int = 42,
     ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], float]]:
     """
         Successive halving over model families (MLP/XGBoost) and their grids.
@@ -2660,6 +2529,7 @@ def successive_halving_search(
                     data=sub_data,
                     train_ratio=train_ratio, val_ratio=val_ratio,
                     standardize=standardize,
+                    seed=seed,
                     reweight_train_data_density=reweight_train_data_density
                 )
                 # ensure fresh weights
@@ -2676,6 +2546,7 @@ def successive_halving_search(
                     data=sub_data,
                     train_ratio=train_ratio, val_ratio=val_ratio,
                     standardize=standardize,
+                    seed=seed,
                     reweight_train_data_density=reweight_train_data_density
                 )
                 # train only the *additional* epochs at this level
