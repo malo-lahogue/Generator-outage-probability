@@ -13,6 +13,8 @@ import pandas as pd
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str((THIS_DIR / "../src").resolve()))
 import inferenceModels as im
+import preprocess_data as ppd
+import grid_search as gs
 
 
 # --------------------------- CLI ---------------------------
@@ -47,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
 
     # Runtime / reproducibility
-    p.add_argument("--seed",   type=int, default=123, help="Random seed for splits / reproducibility.")
+    p.add_argument("--seed",   type=int, default=42, help="Random seed for splits / reproducibility.")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"],
                    help="Default device to request in model specs.")
     p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp", "both"],
@@ -115,7 +117,7 @@ def main() -> None:
     test_periods = [(pd.Timestamp('2022-01-01'), pd.Timestamp('2023-12-31'))]
 
     # ---------- Merge + label prep ----------
-    train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
+    train_val_df, test_df, feature_names, target_columns, integer_encoding = ppd.preprocess_data(failure_data_path=args.failures,
                                                                                                 weather_data_path=args.weather,
                                                                                                 power_load_data_path=args.powerload,
                                                                                                 feature_names=feature_names,
@@ -128,10 +130,10 @@ def main() -> None:
                                                                                                 test_periods=test_periods,
                                                                                                 dropNA = True,
                                                                                                 feature_na_drop_threshold = 0.2,
-                                                                                                keep_initial_state = False,
                                                                                                 )
-    
 
+    if "Initial_gen_state" in feature_names:
+        feature_names.remove("Initial_gen_state")
     # subset_length = 100
     # train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
     print(f"Train/Val Dataset shape: {train_val_df.shape}")
@@ -176,7 +178,6 @@ def main() -> None:
 
     xgb_common_train = {
                         "weights_data": True,
-                        # "seed": args.seed,
                      }
 
     # 2) MLP
@@ -208,7 +209,6 @@ def main() -> None:
                         "early_stopping": True,
                         "grad_clip_norm": 1.0,
                         "lr_scheduler": "plateau",
-                        # "seed": args.seed,
                         }
     
     mlp_train_grid = {
@@ -274,7 +274,7 @@ def main() -> None:
     ]
 
     # ---------- Run search ----------
-    winners = im.successive_halving_search(
+    winners = gs.successive_halving_search(
         model_specs=model_specs,
         data=train_val_df,
         standardize=stand_cols,
@@ -285,20 +285,21 @@ def main() -> None:
         levels=training_levels,
         top_keep_ratio=args.top_keep,
         resume=args.reuse_results,
-        reweight_train_data_density='Temperature'
+        reweight_train_data_density='Temperature',
+        seed=args.seed,
         # seed=args.seed,  # if supported by your helper
     )
 
     # ---------- Summarize results ----------
-    print("\n=== Global winner ===")
+    # print("\n=== Global winner ===")
 
-    best_model = min(winners, key=lambda x: x[3])
-    mi, build_p, train_p, score = best_model
-    spec = model_specs[mi]
-    print(f"[{spec['name']}] score={score:.6f}")
-    print(" build:", json.dumps(build_p, sort_keys=True))
-    print(" train:", json.dumps(train_p, sort_keys=True))
-    print("-" * 60)
+    # best_model = min(winners, key=lambda x: x[3])
+    # mi, build_p, train_p, score = best_model
+    # spec = model_specs[mi]
+    # print(f"[{spec['name']}] score={score:.6f}")
+    # print(" build:", json.dumps(build_p, sort_keys=True))
+    # print(" train:", json.dumps(train_p, sort_keys=True))
+    # print("-" * 60)
 
 
 if __name__ == "__main__":
