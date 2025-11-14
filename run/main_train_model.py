@@ -14,6 +14,7 @@ import pandas as pd
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str((THIS_DIR / "../src").resolve()))
 import inferenceModels as im
+import preprocess_data as ppd
 
 
 # --------------------------- CLI ---------------------------
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
 
     
     # Runtime / reproducibility
-    p.add_argument("--seed",   type=int, default=123, help="Random seed for splits / reproducibility.")
+    p.add_argument("--seed",   type=int, default=42, help="Random seed for splits / reproducibility.")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"],
                    help="Default device to request in model specs.")
     p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp"],
@@ -113,7 +114,7 @@ def main() -> None:
 
 
     # ---------- Merge + label prep ----------
-    train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
+    train_val_df, test_df, feature_names, target_columns, integer_encoding = ppd.preprocess_data(failure_data_path=args.failures,
                                                                                                 weather_data_path=args.weather,
                                                                                                 power_load_data_path=args.powerload,
                                                                                                 feature_names=feature_names,
@@ -126,11 +127,11 @@ def main() -> None:
                                                                                                 test_periods=test_periods,
                                                                                                 dropNA = True,
                                                                                                 feature_na_drop_threshold = 0.2,
-                                                                                                keep_initial_state = False,
                                                                                                 )
 
                                                                                 
-    
+    if "Initial_gen_state" in feature_names:
+        feature_names.remove("Initial_gen_state")
 
 
     # subset_length = 100
@@ -175,7 +176,7 @@ def main() -> None:
         xgb_model.build_model(**build_kw)
         
 
-        xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature')
+        xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, seed=args.seed, standardize=stand_cols, reweight_train_data_density='Temperature')
         xgb_model.train_model(weights_data=True)
         xgb_model.save_model(path_to_save)
 
