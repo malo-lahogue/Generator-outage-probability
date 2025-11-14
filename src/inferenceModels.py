@@ -36,6 +36,7 @@ torch.set_num_threads(1)
 
 # ── Scikit-Learn ────────────────────────────────────────────────────────────────
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KernelDensity
 
 # ── XGBoost ─────────────────────────────────────────────────────────────────────
 import xgboost as xgb
