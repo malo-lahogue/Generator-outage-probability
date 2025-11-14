@@ -1836,236 +1836,292 @@ class MLP(GeneratorFailureProbabilityInference):
         plt.show()
         return imp if return_df else None
 
-
-
-
-
-
 class xgboostModel(GeneratorFailureProbabilityInference):
     """
-        XGBoost surrogate wrapper (scikit-learn style).
+    XGBoost multi-class classifier wrapper (scikit-learn style).
 
-        INPUTS (constructor):
-        - verbose (bool) : Print model info.
+    This wrapper is **classification-only** and assumes:
 
-        OUTPUTS:
-        - None
+    - A single integer-encoded target column (e.g. 0..num_classes-1).
+    - Features are already standardized in-place by
+      `GeneratorFailureProbabilityInference.prepare_data` if requested.
+    - The model outputs class probabilities via `predict_proba`.
+
+    Typical usage:
+        model = xgboostModel(verbose=True)
+        model.build_model(
+            max_depth=4,
+            eta=0.1,
+            gamma=0.0,
+            reg_lambda=1.0,
+            num_boost_round=200,
+            feature_cols=feature_names,
+            target_cols=["Final_gen_state"],
+            num_classes=3,
+        )
+        model.prepare_data(df, standardize=False)  # or True / list, handled upstream
+        model.train_model(weights_data=True)
+        probs = model.predict(test_df[feature_names])
     """
 
     def __init__(self, verbose: bool = True):
         super().__init__(verbose=verbose)
-        self.model: Optional[xgb.XGBRegressor] = None
+        # classification-only
+        self.model: Optional[xgb.XGBClassifier] = None
 
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
     def build_model(
-        self,
-        max_depth: int,
-        eta: float,
-        gamma: float,
-        reg_lambda: float,
-        num_boost_round: int = 100,
-        feature_cols: Optional[list[str]] = None,
-        target_cols: Optional[list[str]] = None,
-        num_classes: int = 3,
-        eval_metric: str = 'mlogloss',
-        objective: str = 'multi:softprob',
-        early_stopping_rounds: int = 10,
-        subsample: float = 1.0,
-        device: str = 'cpu',
-        ) -> None:
+                    self,
+                    max_depth: int,
+                    eta: float,
+                    gamma: float,
+                    reg_lambda: float,
+                    num_boost_round: int = 100,
+                    feature_cols: Optional[list[str]] = None,
+                    target_cols: Optional[list[str]] = None,
+                    num_classes: int = 3,
+                    eval_metric: str = "mlogloss",
+                    objective: str = "multi:softprob",
+                    early_stopping_rounds: int = 10,
+                    subsample: float = 1.0,
+                    device: str = "cpu",
+                    ) -> None:
         """
-        Instantiate the XGBRegressor with requested hyperparameters.
+        Instantiate the XGBClassifier with requested hyperparameters.
 
-        INPUTS:
-        - max_depth (int) : Maximum tree depth.
-        - eta (float) : Learning rate.
-        - gamma (float) : Minimum loss reduction required to split.
-        - reg_lambda (float) : L2 regularization term on weights.
-        - num_boost_round (int) : Number of boosting rounds (n_estimators).
-        - feature_cols (list[str] | None) : Input features.
-        - target_cols (list[str] | None) : Target columns.
-        - eval_metric (str) : e.g., 'rmse', 'logloss'.
-        - objective (str) : e.g., 'reg:squarederror', 'reg:logistic'.
-        - early_stopping_rounds (int) : Patience on validation metric.
-        - subsample (float) : Row subsampling ratio.
-        - device (str) : 'cpu' or 'cuda' (requires appropriate XGBoost build).
-
-        OUTPUTS:
-        - None
+        Parameters
+        ----------
+        max_depth : int
+            Maximum tree depth.
+        eta : float
+            Learning rate.
+        gamma : float
+            Minimum loss reduction required to split.
+        reg_lambda : float
+            L2 regularization term on leaf weights.
+        num_boost_round : int
+            Number of boosting rounds (n_estimators).
+        feature_cols : list[str] | None
+            Names of feature columns.
+        target_cols : list[str] | None
+            Single-element list with the target column name.
+        num_classes : int
+            Total number of classes (manual; may exceed the classes present in this dataset).
+        eval_metric : str
+            Evaluation metric, e.g. 'mlogloss'.
+        objective : str
+            XGBoost objective, fixed to a multi-class classification objective.
+        early_stopping_rounds : int
+            Patience on validation metric.
+        subsample : float
+            Row subsampling ratio.
+        device : str
+            'cpu' or GPU device string (requires appropriate XGBoost build).
         """
         self.feature_cols = feature_cols or []
         self.target_cols = target_cols or []
-        self.num_classes = num_classes
-        self.max_depth = max_depth
-        self.eta = eta
-        self.gamma = gamma
-        self.reg_lambda = reg_lambda
-        self.num_boost_round = num_boost_round
-        self.eval_metric = eval_metric
-        self.objective = objective
-        self.early_stopping_rounds = early_stopping_rounds
-        self.subsample = subsample
-        self.device = device
-
-        self.model = xgb.XGBClassifier(
-            max_depth=max_depth,
-            eta=eta,
-            gamma=gamma,
-            reg_lambda=reg_lambda,
-            n_estimators=num_boost_round,
-            subsample=subsample,
-            eval_metric=eval_metric,
-            objective=objective,
-            early_stopping_rounds=early_stopping_rounds,
-            num_class=num_classes,
-            verbosity=1 if self.verbose else 0,
-            device=device,
+        if len(self.target_cols) != 1:
+            raise ValueError(
+                f"xgboostModel expects exactly one target column; got {self.target_cols!r}"
             )
 
-        # record rebuild spec
+        self.num_classes = int(num_classes)
+        self.max_depth = int(max_depth)
+        self.eta = float(eta)
+        self.gamma = float(gamma)
+        self.reg_lambda = float(reg_lambda)
+        self.num_boost_round = int(num_boost_round)
+        self.eval_metric = eval_metric
+        self.objective = objective
+        self.early_stopping_rounds = int(early_stopping_rounds)
+        self.subsample = float(subsample)
+        self.device = device
+
+        # Classification-only estimator
+        self.model = xgb.XGBClassifier(
+            max_depth=self.max_depth,
+            eta=self.eta,
+            gamma=self.gamma,
+            reg_lambda=self.reg_lambda,
+            n_estimators=self.num_boost_round,
+            subsample=self.subsample,
+            eval_metric=self.eval_metric,
+            objective=self.objective,
+            early_stopping_rounds=self.early_stopping_rounds,
+            num_class=self.num_classes,
+            verbosity=1 if self.verbose else 0,
+            device=self.device,
+        )
+
+        # record rebuild spec for save/load
         self._build_spec = {
             "builder": "build_model",
             "kwargs": {
-                "max_depth": max_depth,
-                "eta": eta,
-                "gamma": gamma,
-                "reg_lambda": reg_lambda,
-                "num_boost_round": num_boost_round,
+                "max_depth": self.max_depth,
+                "eta": self.eta,
+                "gamma": self.gamma,
+                "reg_lambda": self.reg_lambda,
+                "num_boost_round": self.num_boost_round,
                 "feature_cols": self.feature_cols,
                 "target_cols": self.target_cols,
-                "eval_metric": eval_metric,
-                "objective": objective,
-                "early_stopping_rounds": early_stopping_rounds,
-                "num_classes":num_classes,
-                "subsample": subsample,
-                "device": device,
+                "num_classes": self.num_classes,
+                "eval_metric": self.eval_metric,
+                "objective": self.objective,
+                "early_stopping_rounds": self.early_stopping_rounds,
+                "subsample": self.subsample,
+                "device": self.device,
             },
         }
 
         if self.verbose:
             print(self.model)
-
+    
+    # ------------------------------------------------------------------
+    # Train
+    # ------------------------------------------------------------------
     def train_model(self, weights_data: bool = False) -> None:
         """
-        Fit the model on train/val splits.
+        Fit the classifier on train/val splits.
 
-        INPUTS:
-        - weights_data (bool) : If True, use 'Data_weight' as sample weights.
+        Parameters
+        ----------
+        weights_data : bool
+            If True, use 'Data_weight' as sample weights for train and val.
 
-        OUTPUTS:
-        - None
+        Notes
+        -----
+        - Assumes `prepare_data` has already been called, and that
+          standardization (if any) has been applied in-place to
+          `self.train_data` and `self.val_data`.
+        - `target_cols` must contain exactly one column with integer labels
+          in [0, num_classes-1], even if some classes are absent in this
+          particular dataset.
         """
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
+        if not hasattr(self, "train_data") or not hasattr(self, "val_data"):
+            raise ValueError("Train/val data not found. Call prepare_data() first.")
 
-        if weights_data:
-            weights = self.train_data["Data_weight"].to_numpy()
+        target_col = self.target_cols[0]
+
+        # y must be 1D with integer labels
+        y_train = self.train_data[target_col].to_numpy(dtype=np.int64)
+        y_val = self.val_data[target_col].to_numpy(dtype=np.int64)
+
+        # If the model has been fitted before with a different label set,
+        # reset it to avoid XGBoost's "Invalid classes inferred" error.
+        if hasattr(self.model, "classes_"):
+            prev = np.asarray(self.model.classes_)
+            curr = np.unique(y_train)
+            if not np.array_equal(prev, curr):
+                if self.verbose:
+                    print(
+                        "[xgboostModel] Detected label set change "
+                        f"{prev.tolist()} -> {curr.tolist()}; resetting estimator."
+                    )
+                self.reset_model()
+
+        # Sample weights
+        if weights_data and "Data_weight" in self.train_data.columns:
+            w_train = self.train_data["Data_weight"].to_numpy(dtype=np.float32)
+            w_val = self.val_data["Data_weight"].to_numpy(dtype=np.float32)
         else:
-            weights = np.ones(len(self.train_data), dtype=np.float32)
+            w_train = None
+            w_val = None
 
         X_train = self.train_data[self.feature_cols]
-        y_train = self.train_data[self.target_cols]
         X_val = self.val_data[self.feature_cols]
-        y_val = self.val_data[self.target_cols]
 
-        # XGBRegressor supports early_stopping via fit(...) args
+
         self.model.fit(
             X_train,
             y_train,
-            sample_weight=weights,
+            sample_weight=w_train,
             eval_set=[(X_val, y_val)],
-            # early_stopping_rounds=self.early_stopping_rounds,
+            sample_weight_eval_set=[w_val] if w_val is not None else None,
         )
-
+    
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
     def reset_model(self) -> None:
         """
-        Recreate the estimator with original hyperparameters (weights discarded).
-
-        INPUTS:
-        - None
-
-        OUTPUTS:
-        - None
+        Recreate the classifier with original hyperparameters (weights discarded).
         """
         if self.model is not None:
             self.model = xgb.XGBClassifier(
-                                max_depth=self.max_depth,
-                                eta=self.eta,
-                                gamma=self.gamma,
-                                reg_lambda=self.reg_lambda,
-                                n_estimators=self.num_boost_round,
-                                subsample=self.subsample,
-                                eval_metric=self.eval_metric,
-                                objective=self.objective,
-                                early_stopping_rounds=self.early_stopping_rounds,
-                                num_class=self.num_classes,
-                                verbosity=1 if self.verbose else 0,
-                                device=self.device,
-                            )
-            # self.model = xgb.XGBRegressor(
-            #     max_depth=self.max_depth,
-            #     eta=self.eta,
-            #     gamma=self.gamma,
-            #     reg_lambda=self.reg_lambda,
-            #     n_estimators=self.num_boost_round,
-            #     subsample=self.subsample,
-            #     eval_metric=self.eval_metric,
-            #     objective=self.objective,
-            #     verbosity=1 if self.verbose else 0,
-            #     device=self.device,
-            # )
+                max_depth=self.max_depth,
+                eta=self.eta,
+                gamma=self.gamma,
+                reg_lambda=self.reg_lambda,
+                n_estimators=self.num_boost_round,
+                subsample=self.subsample,
+                eval_metric=self.eval_metric,
+                objective=self.objective,
+                early_stopping_rounds=self.early_stopping_rounds,
+                num_class=self.num_classes,
+                verbosity=1 if self.verbose else 0,
+                device=self.device,
+            )
 
+    # ------------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
-        Predict targets for new inputs, honoring training-time standardization.
+        Predict class probabilities for new inputs.
 
-        INPUTS:
-        - X (pd.DataFrame) : Inputs in original (non-standardized) scale.
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Input features in original scale. If standardization was
+            applied in `prepare_data`, the same scaler is used here
+            to transform X before prediction.
 
-        OUTPUTS:
-        - y_pred (np.ndarray) : Predictions in original scale, (N, T).
+        Returns
+        -------
+        y_pred : np.ndarray
+            Array of shape (N, num_classes) with class probabilities.
         """
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
 
         X_df = X.copy()
 
-        # standardize if needed
+        # Feature standardization is controlled by GeneratorFailureProbabilityInference.prepare_data.
         if self.standardize is True and self.scaler_feature is not None:
-            X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(X_df[self.feature_cols].to_numpy())
-            stand_targets = list(self.target_cols)
+            # All features were standardized during training
+            X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(
+                X_df[self.feature_cols].to_numpy()
+            )
         elif isinstance(self.standardize, list) and self.scaler_feature is not None:
-            stand_feat = [c for c in self.feature_cols if c in self.standardize and c in X_df.columns]
-            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat])
-            stand_targets = [c for c in self.target_cols if c in self.standardize]
-        else:
-            stand_targets = []
+            # Only some features were standardized
+            stand_feat = [
+                c for c in self.feature_cols
+                if c in self.standardize and c in X_df.columns
+            ]
+            if stand_feat:
+                X_df.loc[:, stand_feat] = self.scaler_feature.transform(
+                    X_df[stand_feat].to_numpy()
+                )
 
         X_np = X_df[self.feature_cols].to_numpy(dtype=np.float32)
         y_pred = self.model.predict_proba(X_np)
 
-        # ensure 2D
+        # Ensure 2D
         if y_pred.ndim == 1:
             y_pred = y_pred.reshape(-1, 1)
 
-        # inverse-transform any standardized targets
-        if self.scaler_target is not None and stand_targets:
-            y_df = pd.DataFrame(y_pred, columns=self.target_cols)
-            y_df.loc[:, stand_targets] = self.scaler_target.inverse_transform(y_df[stand_targets].to_numpy())
-            y_pred = y_df[self.target_cols].to_numpy(dtype=np.float32)
-
         return y_pred
 
-    # ---------------------- Save / Load ----------------------
-
+    # ------------------------------------------------------------------
+    # Save / Load
+    # ------------------------------------------------------------------
     def save_model(self, model_path: str) -> None:
         """
         Save a single-file checkpoint with XGBoost booster + metadata.
-
-        INPUTS:
-        - model_path (str) : Destination path.
-
-        OUTPUTS:
-        - None
         """
         if self.model is None:
             raise ValueError("No model to save. Did you call build_model()?")
@@ -2101,7 +2157,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
                 "xgboost": xgb.__version__,
                 "numpy": np.__version__,
                 "pandas": pd.__version__,
-                "sklearn": StandardScaler.__module__.split('.')[0],
+                "sklearn": StandardScaler.__module__.split(".")[0],
             },
             "model": {
                 "module": self.__class__.__module__,
@@ -2119,12 +2175,19 @@ class xgboostModel(GeneratorFailureProbabilityInference):
                 "feature_cols": getattr(self, "feature_cols", None),
                 "target_cols": getattr(self, "target_cols", None),
                 "standardize": getattr(self, "standardize", False),
-                "scaler_feature": _pickle_or_none(getattr(self, "scaler_feature", None)),
-                "scaler_target": _pickle_or_none(getattr(self, "scaler_target", None)),
+                "scaler_feature": _pickle_or_none(
+                    getattr(self, "scaler_feature", None)
+                ),
+                # kept for compatibility, but unused for classification
+                "scaler_target": _pickle_or_none(
+                    getattr(self, "scaler_target", None)
+                ),
             },
             "train": {
-                "early_stopping_rounds": getattr(self, "early_stopping_rounds", None),
-                "num_classes": getattr(self, "num_classes", None)
+                "early_stopping_rounds": getattr(
+                    self, "early_stopping_rounds", None
+                ),
+                "num_classes": getattr(self, "num_classes", None),
             },
         }
 
@@ -2136,13 +2199,6 @@ class xgboostModel(GeneratorFailureProbabilityInference):
     def load_model(cls, model_path: str, verbose: bool = True):
         """
         Reconstruct an xgboostModel instance from a checkpoint.
-
-        INPUTS:
-        - model_path (str) : Path to saved checkpoint.
-        - verbose (bool) : Print rebuild info.
-
-        OUTPUTS:
-        - obj (xgboostModel) : Reconstructed object with booster and scalers restored.
         """
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Model file {model_path} does not exist.")
@@ -2163,7 +2219,9 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         obj.feature_cols = data_section.get("feature_cols", None)
         obj.target_cols = data_section.get("target_cols", None)
         obj.standardize = data_section.get("standardize", False)
-        obj.num_classes = train_section.get("num_classes", getattr(obj, "num_classes", None))
+        obj.num_classes = train_section.get(
+            "num_classes", getattr(obj, "num_classes", None)
+        )
 
         if not build_spec or "builder" not in build_spec or "kwargs" not in build_spec:
             raise RuntimeError("Invalid or missing build_spec in checkpoint.")
@@ -2180,7 +2238,7 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             booster.load_model(bytearray(booster_raw))
             obj.model._Booster = booster
 
-            # --- restore sklearn wrapper metadata ---
+            # restore sklearn wrapper metadata
             try:
                 n_classes = getattr(obj, "num_classes", None)
                 if n_classes is None or n_classes < 1:
@@ -2203,543 +2261,104 @@ class xgboostModel(GeneratorFailureProbabilityInference):
             except Exception:
                 return None
 
-        obj.scaler_feature = _unpickle_or_none(data_section.get("scaler_feature", None))
-        obj.scaler_target = _unpickle_or_none(data_section.get("scaler_target", None))
+        obj.scaler_feature = _unpickle_or_none(
+            data_section.get("scaler_feature", None)
+        )
+        obj.scaler_target = _unpickle_or_none(
+            data_section.get("scaler_target", None)
+        )
 
-        obj.early_stopping_rounds = train_section.get("early_stopping_rounds", None)
+        obj.early_stopping_rounds = train_section.get(
+            "early_stopping_rounds", None
+        )
 
         if verbose:
             print(f"Loaded {class_name} from {model_path}")
-            print(f"Rebuilt with {build_spec['builder']}(**{list(build_spec['kwargs'].keys())})")
+            print(
+                f"Rebuilt with {build_spec['builder']}(**{list(build_spec['kwargs'].keys())})"
+            )
             if booster_raw is None:
                 print("Note: booster was not saved (model likely not fitted yet).")
         return obj
+    
 
-    # ---------------------- Importance (XGBoost booster) ----------------------
-
-    def get_feature_importance(self, importance_type: str = 'weight') -> dict[str, float]:
+    def get_feature_importance(
+                    self, 
+                    importance_type: str = "weight"
+                    ) -> dict[str, float]:
         """
-        Return feature importance from the fitted booster.
+        Return feature importance from the fitted booster, mapped to feature names.
 
-        INPUTS:
-        - importance_type (str) : One of {'weight','gain','cover'}.
+        Parameters
+        ----------
+        importance_type : str
+            One of {'weight', 'gain', 'cover', 'total_gain', 'total_cover'}.
 
-        OUTPUTS:
-        - importance (dict[str,float]) : Mapping feature -> importance score.
+        Returns
+        -------
+        importance : dict[str, float]
+            Mapping from feature name -> importance score.
         """
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model/fit first.")
         booster = self.model.get_booster()
-        return booster.get_score(importance_type=importance_type)
+        raw_imp = booster.get_score(importance_type=importance_type)  # keys like 'f0','f1',...
+        mapped: dict[str, float] = {}
+        for k, v in raw_imp.items():
+            # Map 'f0' -> feature_cols[0] where possible
+            if k.startswith("f") and k[1:].isdigit():
+                idx = int(k[1:])
+                if 0 <= idx < len(self.feature_cols):
+                    name = self.feature_cols[idx]
+                else:
+                    name = k
+            else:
+                name = k
+            mapped[name] = float(v)
+        return mapped
 
-    def plotFeatureImportance(self, importance_criterions: list[str] = ['weight', 'gain', 'cover'], n_features: int = 10, exclude_states=True) -> None:
+    def plotFeatureImportance(
+                        self,
+                        importance_criterions: list[str] = ("weight", "gain", "cover"),
+                        n_features: int = 10,
+                        exclude_states: bool = True,
+                        ) -> None:
         """
-        Plot the top N features for several importance criteria.
+        Plot the top-N features for several importance criteria.
 
-        INPUTS:
-        - importance_criterions (list[str]) : Criteria to display.
-        - n_features (int) : Top features to show per criterion.
-
-        OUTPUTS:
-        - None
+        Parameters
+        ----------
+        importance_criterions : list[str]
+            Criteria to display, e.g. ['weight','gain','cover'].
+        n_features : int
+            Top features to show per criterion.
+        exclude_states : bool
+            If True, drop features whose name contains 'State'.
         """
-        fig, axs = plt.subplots(len(importance_criterions), 1, figsize=(n_features, 6 * len(importance_criterions)))
+        fig, axs = plt.subplots(
+            len(importance_criterions),
+            1,
+            figsize=(max(6, 0.7 * n_features), 4 * len(importance_criterions)),
+        )
         axs = np.atleast_1d(axs)
-        i = 0
+
         for j, criterion in enumerate(importance_criterions):
             importance = self.get_feature_importance(importance_type=criterion)
-            imp_df = pd.DataFrame(list(importance.items()), columns=['Feature', 'Importance']).sort_values(
-                by='Importance', ascending=False
-            ).reset_index(drop=True)
+            imp_df = (
+                pd.DataFrame(
+                    list(importance.items()), columns=["Feature", "Importance"]
+                )
+                .sort_values(by="Importance", ascending=False)
+                .reset_index(drop=True)
+            )
             if exclude_states:
-                imp_df = imp_df[~imp_df['Feature'].str.contains('State')]
-            axs[j].bar(imp_df['Feature'][:n_features], imp_df['Importance'][:n_features])
-            axs[j].set_xlabel('Importance', fontsize=20)
-            axs[j].set_title(f'Feature Importance - {criterion}', fontsize=20)
-            axs[j].set_xticklabels(imp_df['Feature'][:n_features], rotation=45, ha='right', fontsize=20)
-            axs[j].set_ylabel('Importance Score', fontsize=20)
-            i += 1
+                imp_df = imp_df[~imp_df["Feature"].str.contains("State")]
+
+            top = imp_df.head(n_features)
+            axs[j].bar(top["Feature"], top["Importance"])
+            axs[j].set_title(f"Feature Importance – {criterion}", fontsize=14)
+            axs[j].set_ylabel("Importance Score", fontsize=12)
+            axs[j].tick_params(axis="x", labelrotation=45)
 
         plt.tight_layout()
         plt.show()
-
-
-
-
-# Grid search utilities
-
-# ----------------- helpers -----------------
-
-def _expand_grid(param_grid: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    """
-    Turn a dict of lists into a sequence of dicts (Cartesian product).
-    Example: {"a":[1,2], "b":[10]} -> {"a":1,"b":10}, {"a":2,"b":10}
-    """
-    keys = list(param_grid.keys())
-    vals = [v if isinstance(v, (list, tuple)) else [v] for v in (param_grid[k] for k in keys)]
-    for combo in itertools.product(*vals):
-        yield dict(zip(keys, combo))
-
-def _val_loss_numpy(
-    model,
-    metric: str = "mse",
-    weight_col: str = "Data_weight",
-    use_weights: bool = True,
-    ) -> float:
-    """
-    Compute a (possibly weighted) validation loss for any model that has:
-      - model.val_data  (pd.DataFrame or torch Dataset/Subsets)
-      - model.feature_cols, model.target_cols
-      - model.predict(X_df) -> np.ndarray  (for DataFrame path)
-    If val_data is a torch Dataset and the model implements
-    `_gather_val_arrays()` and `_predict_np()`, use those (with weights).
-
-    Supported metrics: 'mse', 'mae', 'logloss' (BCE).
-    """
-
-    def _weighted_mean(per_sample: np.ndarray, w: np.ndarray | None) -> float:
-        if w is None:
-            return float(per_sample.mean())
-        w = np.asarray(w, dtype=np.float64).reshape(-1)
-        denom = w.sum()
-        if denom <= 0:
-            return float(per_sample.mean())
-        return float((per_sample * w).sum() / denom)
-
-    def _score_arrays(y_true: np.ndarray, y_pred: np.ndarray, w: np.ndarray | None) -> float:
-        y_true = np.asarray(y_true, dtype=np.float64)
-        y_pred = np.asarray(y_pred, dtype=np.float64)
-
-        # Ensure 2D: (N, T)
-        if y_true.ndim == 1:
-            y_true = y_true[:, None]
-        if y_pred.ndim == 1:
-            y_pred = y_pred[:, None]
-
-        m = metric.lower()
-        if m == "mse":
-            per_sample = ((y_true - y_pred) ** 2).mean(axis=1)
-            return _weighted_mean(per_sample, w)
-        elif m == "mae":
-            per_sample = np.abs(y_true - y_pred).mean(axis=1)
-            return _weighted_mean(per_sample, w)
-        elif m == "logloss":
-            eps = 1e-9
-            p = np.clip(y_pred, eps, 1.0 - eps)
-            bce = -(y_true * np.log(p) + (1.0 - y_true) * np.log(1.0 - p))  # (N, T)
-            per_sample = bce.mean(axis=1)
-            return _weighted_mean(per_sample, w)
-        elif m == "cross_entropy":
-            eps = 1e-9
-            p = np.clip(y_pred, eps, 1.0 - eps)
-            # If y_true is one-hot, convert to class indices
-            if y_true.ndim == 2 and y_true.shape[1] > 1:
-                y_idx = y_true.argmax(axis=1)
-            else:
-                y_idx = y_true.astype(int).flatten()
-
-            # Gather predicted probability for the correct class
-            n = p.shape[0]
-            p_true = p[np.arange(n), y_idx]
-
-            per_sample = -np.log(p_true)
-            return _weighted_mean(per_sample, w)
-            
-        else:
-            raise ValueError("metric must be 'mse', 'mae', 'logloss' or 'cross_entropy'.")
-
-    # ---- Path 1: pandas DataFrame (e.g., XGBoost wrapper) ----
-    if hasattr(model, "val_data") and isinstance(model.val_data, pd.DataFrame):
-        val_df = model.val_data
-
-        # columns
-        X_cols = list(np.unique(np.array(model.feature_cols).flatten()))
-        y_cols = list(np.unique(np.array(model.target_cols).flatten()))
-
-        # data
-        X_val = val_df[X_cols].copy()
-        y_true = val_df[y_cols].to_numpy(dtype=np.float64)
-        y_pred = model.predict(X_val)
-
-        # weights (optional)
-        w = None
-        if use_weights and weight_col in val_df.columns:
-            w = val_df[weight_col].to_numpy(dtype=np.float64)
-
-        return _score_arrays(y_true, y_pred, w)
-
-    # ---- Path 2: torch Dataset (e.g., MLP wrapper) ----
-    # Prefer computing fresh weighted metric over just min(val_loss)
-    has_helpers = all(
-        hasattr(model, attr) for attr in ("_gather_val_arrays", "_predict_np")
-    )
-    if hasattr(model, "val_data") and not isinstance(model.val_data, pd.DataFrame) and has_helpers:
-        # Ask the model for (X_val, y_val, weights) in numpy form
-        # loss_name is only used to shape/format y in _gather_val_arrays
-        loss_name = "logloss" if metric.lower() == "logloss" else metric.lower()
-        X_val, y_val, W = model._gather_val_arrays(loss_name=loss_name)
-        y_pred = model._predict_np(X_val)
-
-        w = W if use_weights else None
-        return _score_arrays(y_val, y_pred, w)
-
-    # ---- Fallback: min validation loss history if present ----
-    if hasattr(model, "val_loss") and len(model.val_loss) > 0:
-        return float(np.min(model.val_loss))
-
-    raise ValueError("Cannot compute validation loss: no suitable val_data or helpers found.")
-
-
-def _already_done_df(csv_path: str, model_per_state) -> pd.DataFrame:
-    cols = ["level", "model_name", "build_params", "train_params", "min_val_loss", "timestamp"]
-    if model_per_state:
-        cols += ["state"]
-    if os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path)
-            # ensure expected columns exist
-            for c in cols:
-                if c not in df.columns:
-                    df[c] = None
-            return df[cols]
-        except Exception:
-            pass
-    return pd.DataFrame(columns=cols)
-
-
-
-def _row_key(level_name: str, model_name: str, build_params: Dict[str, Any], train_params: Dict[str, Any]) -> Tuple[str, str, str, str]:
-    """Deterministic key for resuming."""
-    return (
-        str(level_name),
-        str(model_name),
-        json.dumps(build_params, sort_keys=True).replace(",", ";"),
-        json.dumps(train_params,  sort_keys=True).replace(",", ";"),
-    )
-
-
-
-# ----------------- main search -----------------
-
-def successive_halving_search(
-    model_specs: List[Dict[str, Any]],
-    data: pd.DataFrame,
-    standardize: List[str] | bool,
-    result_csv: str,
-    train_ratio: float = 0.8,
-    val_ratio: float   = 0.2,
-    val_metric_per_model: Dict[str, str] | None = None,  # e.g. {"xgboostModel": "logloss", "MLP": "logloss"}
-    levels: List[Dict[str, Any]] | None = None,
-    top_keep_ratio: float = 0.33,
-    resume: bool = True,
-    subset_strategy: str = "head",   # "head" (time-respecting) or "random"
-    subset_seed: int = 42,
-    warm_start: bool = False,         # if True: keep MLP weights across levels (XGB still fresh)
-    verbose=False,
-    model_per_state: bool = False,  # if True: save model checkpoint per state (level,candidate)
-    reweight_train_data_density=False,
-    seed: int = 42,
-    ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], float]]:
-    """
-        Successive halving over model families (MLP/XGBoost) and their grids.
-
-        Returns the survivors of the last level as a list of tuples:
-        (model_index, build_params, train_params, score)
-
-        Notes on training state:
-        - Default behavior (**warm_start=False**): every candidate at every level
-            is trained from scratch (fresh model instance, fresh weights).
-        - If **warm_start=True**: for MLP candidates only, we keep the same model
-            object across levels and train **additional** epochs instead of restarting.
-            XGBoost still re-trains fresh each level (continuation is non-trivial).
-        INPUTS:
-            - model_specs (list[dict]) : List of model specifications. Each spec:
-                                                {
-                                                "name": "MLP" or "xgboostModel",
-                                                "constructor": callable -> returns a fresh model instance,
-                                                "build_grid": dict of lists for build_model kwargs,
-                                                "train_grid": dict of lists for train_model kwargs,
-                                                "common_build": dict of fixed build_model kwargs,
-                                                "common_train": dict of fixed train_model kwargs
-                                                }
-            - data (pd.DataFrame) : Full dataset with features, targets, optional 'Data_weight' column.
-            - standardize (list[str] | bool) : If True, standardize all features and targets. If list, standardize only those columns.
-            - result_csv (str) : Path to CSV file to log results (appended if exists).
-            - train_ratio (float) : Fraction of data for training (rest for validation).
-            - val_ratio (float) : Fraction of data for validation (rest for training).
-            - val_metric_per_model (dict[str,str] | None) : Optional per-model validation metric overrides.
-            - levels (list[dict] | None) : List of levels. Each level:
-                                                {
-                                                "name": str,
-                                                "epochs": int,
-                                                "data_cap": int | None  (max training samples; None = all)
-                                                }
-                                            If None, defaults to 3 levels with 40%, 80%, and 100% of data and 150, 500, 2000 epochs.
-            - top_keep_ratio (float) : Fraction of candidates to keep after each level (e.g., 0.33 keeps top third).
-            - resume (bool) : If True, skip candidates already present in result_csv.
-            - subset_strategy (str) : "head" (time-respecting) or "random" subset when data_cap is set.
-            - subset_seed (int) : Random seed for "random" subset strategy.
-            - warm_start (bool) : If True, keep MLP weights across levels (XGB still fresh).
-            - model_per_state (bool) : If True, save model checkpoint per state (level,candidate).
-    """
-    # default levels
-    if levels is None:
-        N = len(data)
-        levels = [
-            {"name": "L1-fast",   "epochs": 150,  "data_cap": int(N * 0.4)},
-            {"name": "L2-medium", "epochs": 500,  "data_cap": int(N * 0.8)},
-            {"name": "L3-full",   "epochs": 2000, "data_cap": None},
-        ]
-
-    if model_per_state:
-        states_list = [feat_state.split('_')[1] for feat_state in data.columns if feat_state.startswith('State_')]
-        print("Will search model per state")
-        print(f"States found: {states_list}")
-
-        for m in model_specs:
-            m["common_build"]["feature_cols"] = [c for c in m["common_build"].get("feature_cols", []) if not c.startswith('State_')]
-
-
-
-        if len(states_list) == 0:
-            raise ValueError("model_per_state=True but no 'State_' columns found in data.")
-        if len(states_list) > 1: # do the search per state
-            results_folder_name = '.'.join(result_csv.split('.')[:-1])
-            print("Results folder name : ", results_folder_name)
-            os.makedirs(results_folder_name, exist_ok=True)
-
-            for m in model_specs:
-                m["common_build"]["feature_cols"] = [c for c in m["common_build"].get("feature_cols", []) if not c.startswith('State_')]
-            for state in states_list:
-                cols_one_state = [c for c in data.columns if not c.startswith('State_')]+['State_'+state]
-                print(f"Searching models for state: {state}")
-                data_state = data.loc[data["State_"+state]==1, cols_one_state].copy()
-
-                successive_halving_search(
-                    model_specs=model_specs,
-                    data=data_state,
-                    standardize=standardize,
-                    result_csv=results_folder_name,
-                    train_ratio=train_ratio,
-                    val_ratio=val_ratio,
-                    val_metric_per_model=val_metric_per_model,  # e.g. {"xgboostModel": "logloss", "MLP": "logloss"}
-                    levels=levels,
-                    top_keep_ratio=top_keep_ratio,
-                    resume=resume,
-                    subset_strategy=subset_strategy,   # "head" (time-respecting) or "random"
-                    subset_seed=subset_seed,
-                    warm_start=warm_start,
-                    verbose=False,
-                    model_per_state=model_per_state,
-                    reweight_train_data_density=reweight_train_data_density
-                )
-        if len(states_list) == 1: # only one state, do the search
-            state_searching = states_list[0]
-
-            result_csv = result_csv + '/_state_'+str(state_searching) + ".csv"
-            print(result_csv)
-        else:
-            # Already done the search
-            return []
-
-
-    # Build all (model_index, build_params, train_params)
-    all_candidates: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
-    for i, spec in enumerate(model_specs):
-        build_grid = spec.get("build_grid", {}) or {}
-        train_grid = spec.get("train_grid", {}) or {}
-        for b in _expand_grid(build_grid):
-            for t in _expand_grid(train_grid):
-                all_candidates.append((i, b, t))
-        # Handle the empty grid case (no build/train params)
-        if not build_grid and not train_grid:
-            all_candidates.append((i, {}, {}))
-    # deduplicate if both branches added the empty case
-    all_candidates = list({(i, json.dumps(b, sort_keys=True), json.dumps(t, sort_keys=True)) for i, b, t in all_candidates})
-    all_candidates = [(i, json.loads(b), json.loads(t)) for (i, b, t) in all_candidates]
-    print(f"[grid] total candidates: {len(all_candidates)}")
-
-    # Resume logic
-    done_df = _already_done_df(result_csv, model_per_state)
-    done_keys = set()
-    if resume and len(done_df):
-        for _, r in done_df.iterrows():
-            if model_per_state:
-                done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"],r["state"]))
-            else:
-                done_keys.add((r["level"], r["model_name"], r["build_params"], r["train_params"]))
-
-
-    # Survivors structure:
-    # - fresh mode: list of (mi, build_params, train_params)
-    # - warm_start: list of dicts with model instance and epochs tracked for MLP
-    if warm_start:
-        survivors: List[Dict[str, Any]] = [
-            {"mi": mi, "build_params": bp, "train_params": tp, "model": None, "trained_epochs": 0}
-            for (mi, bp, tp) in all_candidates
-        ]
-    else:
-        survivors = list(all_candidates)  # type: ignore[assignment]
-
-    # Iterate levels
-    for li, level in enumerate(levels):
-        level_name  = level["name"]
-        level_epochs = int(level["epochs"])
-        data_cap    = level.get("data_cap", None)
-
-        # subset data for this level
-        if data_cap is not None:
-            if subset_strategy == "random":
-                sub_data = data.sample(n=data_cap, random_state=subset_seed).copy()
-            else:
-                sub_data = data.iloc[:data_cap].copy()
-        else:
-            sub_data = data.copy()
-
-        scored: List[Tuple[int, Dict[str, Any], Dict[str, Any], float, Any, int]] = []
-
-        # Evaluate each survivor
-        loop_iter = survivors if warm_start else [{"mi": mi, "build_params": bp, "train_params": tp, "model": None, "trained_epochs": 0} for (mi, bp, tp) in survivors]  # unify view
-
-        for entry in loop_iter:
-            mi           = entry["mi"]
-            build_params = dict(entry["build_params"])
-            train_params = dict(entry["train_params"])
-            existing     = entry.get("model", None)
-            trained_eps  = int(entry.get("trained_epochs", 0))
-
-            spec  = model_specs[mi]
-            mname = spec["name"]
-
-            # Merge fixed params
-            build_kw = dict(spec.get("common_build", {}))
-            build_kw.update(build_params)
-
-            train_kw = dict(spec.get("common_train", {}))
-            train_kw.update(train_params)
-
-            # Cap epochs at this level
-            if "epochs" in train_kw:
-                train_kw["epochs"] = int(min(int(train_kw["epochs"]), level_epochs))
-
-            # Resume skip?
-            key = _row_key(level_name, mname, build_kw, train_kw)
-            if model_per_state:
-                key = (*key, state_searching)
-
-
-            if not warm_start and resume and key in done_keys:
-                prev = done_df.loc[
-                    (done_df["level"] == level_name) &
-                    (done_df["model_name"] == mname) &
-                    (done_df["build_params"] == key[2]) &
-                    (done_df["train_params"] == key[3]) &
-                    (done_df["state"] == state_searching if model_per_state else True)
-                ]
-                if len(prev):
-                    score = float(prev["min_val_loss"].iloc[0])
-                    scored.append((mi, build_params, train_params, score, None, 0))
-                    if verbose:
-                        print(f"[resume] skip level={level_name} model={mname} -> score={score:.6g}")
-                    continue
-
-            # ---------- Build/prepare/train ----------
-            model_obj = existing
-            is_mlp = (mname.lower() == "mlp" or getattr(spec["constructor"](), "__class__").__name__.lower() == "mlp")
-
-            # Build model if fresh or if not warm-starting
-            if (not warm_start) or (model_obj is None) or (not is_mlp):
-                model_obj = spec["constructor"]()
-                model_obj.build_model(**build_kw)
-                model_obj.prepare_data(
-                    data=sub_data,
-                    train_ratio=train_ratio, val_ratio=val_ratio,
-                    standardize=standardize,
-                    seed=seed,
-                    reweight_train_data_density=reweight_train_data_density
-                )
-                # ensure fresh weights
-                if hasattr(model_obj, "reset_model"):
-                    model_obj.reset_model()
-                model_obj.val_loss = []
-                # Train for full (capped) epochs
-                model_obj.train_model(**train_kw)
-                trained_now = int(train_kw.get("epochs", 0))
-                trained_eps = trained_now  # reset count in fresh path
-            else:
-                # Warm start (MLP only): keep weights; re-prepare data (in case data_cap grew)
-                model_obj.prepare_data(
-                    data=sub_data,
-                    train_ratio=train_ratio, val_ratio=val_ratio,
-                    standardize=standardize,
-                    seed=seed,
-                    reweight_train_data_density=reweight_train_data_density
-                )
-                # train only the *additional* epochs at this level
-                target_epochs   = int(train_kw.get("epochs", level_epochs))
-                additional_eps  = max(0, target_epochs - trained_eps)
-                if additional_eps > 0:
-                    tmp_kw = dict(train_kw)
-                    tmp_kw["epochs"] = additional_eps
-                    model_obj.train_model(**tmp_kw)
-                    trained_eps += additional_eps
-
-            # ---------- Score ----------
-            metric = None
-            if val_metric_per_model:
-                metric = (
-                    val_metric_per_model.get(mname) or
-                    val_metric_per_model.get(mname.lower()) or
-                    val_metric_per_model.get(model_obj.__class__.__name__) or
-                    val_metric_per_model.get(model_obj.__class__.__name__.lower())
-                )
-
-            if hasattr(model_obj, "val_loss") and len(model_obj.val_loss) > 0:
-                score = float(np.min(model_obj.val_loss))
-            else:
-                score = _val_loss_numpy(model_obj, metric or "mse")
-
-            scored.append((mi, build_params, train_params, score, model_obj if warm_start and is_mlp else None, trained_eps))
-
-            # ---------- Log row ----------
-            if result_csv:
-                os.makedirs(os.path.dirname(result_csv), exist_ok=True)
-                if model_per_state:
-                    row = {
-                        "state": state_searching,
-                        "level": level_name,
-                        "model_name": mname,
-                        "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
-                        "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
-                        "min_val_loss": score,  # kept name for backward-compat
-                        "timestamp": datetime.datetime.now().astimezone().isoformat()
-                    }
-                else:
-                    row = {
-                        "level": level_name,
-                        "model_name": mname,
-                        "build_params": json.dumps(build_kw, sort_keys=True).replace(",", ";"),
-                        "train_params": json.dumps(train_kw, sort_keys=True).replace(",", ";"),
-                        "min_val_loss": score,  # kept name for backward-compat
-                        "timestamp": datetime.datetime.now().astimezone().isoformat()
-                    }
-                write_header = not os.path.exists(result_csv)
-                with open(result_csv, "a", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=list(row.keys()))
-                    if write_header:
-                        w.writeheader()
-                    w.writerow(row)
-
-        # ---------- Select survivors ----------
-        scored.sort(key=lambda t: t[3])  # sort by score asc
-        keep = max(1, int(math.ceil(len(scored) * top_keep_ratio)))
-
-        if warm_start:
-            survivors = [
-                {"mi": mi, "build_params": bp, "train_params": tp, "model": mdl, "trained_epochs": te}
-                for (mi, bp, tp, _, mdl, te) in scored[:keep]
-            ]
-        else:
-            survivors = [(mi, bp, tp) for (mi, bp, tp, _, _, _) in scored[:keep]]
-
-        # Final level returns the winners
-        if li == len(levels) - 1:
-            return [(mi, bp, tp, sc) for (mi, bp, tp, sc, _, _) in scored[:keep]]
