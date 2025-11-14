@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     # Problem params
     p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
     p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
+    p.add_argument("--states", type=str, default="all", help="States (geographical) to filter on.")
 
     
     # Runtime / reproducibility
@@ -80,29 +81,30 @@ def main() -> None:
     args = parse_args()         # Arguments
     np.random.seed(args.seed)   # Reproducibility
 
+    args.states = args.states.replace('_', ' ')
+
     # I/O prep
     ensure_inputs_exist(args.failures, args.weather, args.powerload)
-    print(f"Computing transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators.")
+    print(f"Computing transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators in state {args.states}.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
-    # feature_names = ['Temperature']
     print(f"{len(feature_names)} initial features: {feature_names}")
 
-    technologies = {'nuclear': ['Nuclear'],
-                    'hydro': ['Pumped Storage/Hydro'],
-                    'geothermal': ['Geothermal'],
-                    'thermal': ['CC GT units ', 
-                                'CC steam units', 
-                                'Co-generator Block ', 
-                                'CoG GT units', 
-                                'CoG steam units ', 
-                                'Combined Cycle Block', 
-                                'Fluidized Bed', 'Fossil-Steam', 
-                                'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
-                                'Gas Turbine/Jet Engine with HSRG', 
-                                'Internal Combustion/Reciprocating Engines',
-                                'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
+    # technologies = {'nuclear': ['Nuclear'],
+    #                 'hydro': ['Pumped Storage/Hydro'],
+    #                 'geothermal': ['Geothermal'],
+    #                 'thermal': ['CC GT units ', 
+    #                             'CC steam units', 
+    #                             'Co-generator Block ', 
+    #                             'CoG GT units', 
+    #                             'CoG steam units ', 
+    #                             'Combined Cycle Block', 
+    #                             'Fluidized Bed', 'Fossil-Steam', 
+    #                             'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
+    #                             'Gas Turbine/Jet Engine with HSRG', 
+    #                             'Internal Combustion/Reciprocating Engines',
+    #                             'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
     technologies = ['Gas Turbine/Jet Engine (Simple Cycle Operation)']
     if technologies is None:
         raise ValueError(f"Unknown technology group: {args.technologies}. Choose from 'nuclear', 'hydro', 'geothermal', or 'thermal'.")
@@ -112,15 +114,22 @@ def main() -> None:
 
     # ---------- Merge + label prep ----------
     train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
-                                                                                weather_data_path=args.weather,
-                                                                                power_load_data_path=args.powerload,
-                                                                                feature_names=feature_names,
-                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
-                                                                                state_one_hot=True,
-                                                                                initial_MC_state_filter=args.initial_state,
-                                                                                technology_filter=technologies,
-                                                                                test_periods=test_periods
-                                                                                )
+                                                                                                weather_data_path=args.weather,
+                                                                                                power_load_data_path=args.powerload,
+                                                                                                feature_names=feature_names,
+                                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
+                                                                                                state_filter = args.states,
+                                                                                                state_one_hot=True,
+                                                                                                initial_MC_state_filter=args.initial_state,
+                                                                                                technology_filter=technologies,
+                                                                                                technology_one_hot=True,
+                                                                                                test_periods=test_periods,
+                                                                                                dropNA = True,
+                                                                                                feature_na_drop_threshold = 0.2,
+                                                                                                keep_initial_state = False,
+                                                                                                )
+
+                                                                                
     
 
 
@@ -137,14 +146,19 @@ def main() -> None:
     feature_names.sort()
     stand_cols.sort()
     target_columns.sort()
+
+    # ---------- Path to save model ----------
+    path_to_save = THIS_DIR / "../Results/Models" / f"model_{args.models.upper()}_Tech_{args.technologies}_State_{args.initial_state}_InitState_{args.states}.pth"
+
     
 
     if "xgb" in args.models:
 
-        build_kw = {"device": "cuda", "early_stopping_rounds": 10, "eta": 0.08, "eval_metric": "mlogloss", "feature_cols": ["State_KANSAS", "Technology_Fluidized Bed", "State_IDAHO", "State_WISCONSIN", "Technology_Co-generator Block ", "State_ARIZONA", "State_CONNECTICUT", "24h_max_load", "Technology_CoG steam units ", "Season_sin", "State_ILLINOIS", "Technology_CC steam units", "Season_cos", "Tmin", "Technology_Fossil-Steam", "FDD", "State_MONTANA", "State_MINNESOTA", "State_TENNESSEE", "2d_load_sum", "State_TEXAS", "Extreme_cold", "State_NEW JERSEY", "State_NORTH CAROLINA", "State_MISSOURI", "Precip_3d", "Sea_level_pressure", "CDD", "Tmean", "Technology_Internal Combustion/Reciprocating Engines", "State_OREGON", "State_NEW MEXICO", "State_SOUTH CAROLINA", "Relative_humidity", "State_DELAWARE", "Temperature", "State_ALABAMA", "Heat_index_isnan", "HDD", "State_CALIFORNIA", "State_RHODE ISLAND", "1d_load_sum", "State_KENTUCKY", "FDD3d", "Weekend", "Extreme_heat", "Tmax", "State_MARYLAND", "Hourly_load_change", "State_NEBRASKA", "Precip_1d", "Dew_point_temperature", "State_LOUISIANA", "DayOfYear_sin", "State_MASSACHUSETTS", "State_UTAH", "State_SOUTH DAKOTA", "State_INDIANA", "State_MISSISSIPPI", "State_FLORIDA", "Technology_CoG GT units", "Technology_Gas Turbine/Jet Engine (Simple Cycle Operation)", "State_MAINE", "Load", "State_OKLAHOMA", "DayOfWeek_cos", "Wet_bulb_temperature", "DayOfYear_cos", "State_WEST VIRGINIA", "State_ARKANSAS", "Heat_index", "State_OHIO", "State_WYOMING", "Month_cos", "State_NEW HAMPSHIRE", "24h_min_load", "Month_sin", "State_GEORGIA", "Technology_CC GT units ", "State_VERMONT", "Snow_depth", "State_NEW YORK", "State_NORTH DAKOTA", "State_IOWA", "Technology_Combined Cycle Block", "Precipitation", "State_WASHINGTON", "Wind_chill_isnan", "Pressure_3hr_change", "Wind_speed", "Technology_Multi-boiler/Multi-turbine", "Technology_Gas Turbine/Jet Engine with HSRG", "State_PENNSYLVANIA", "CDD3d", "State_MICHIGAN", "State_VIRGINIA", "State_NEVADA", "Holiday", "Wind_chill", "HDD3d", "DayOfWeek_sin", "Station_level_pressure", "State_COLORADO"], "gamma": 0.8, "max_depth": 6, "num_boost_round": 100, "num_classes": 3, "objective": "multi:softprob", "reg_lambda": 0.6, "subsample": 0.9, "target_cols": ["Final_gen_state"]}
-        train_kw = {"weights_data": true}
+        build_kw = {"device": "cuda", "early_stopping_rounds": 10, "eta": 0.08, "eval_metric": "mlogloss", "feature_cols": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "DayOfWeek_cos", "DayOfWeek_sin", "DayOfYear_cos", "DayOfYear_sin", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Heat_index_isnan", "Holiday", "Hourly_load_change", "Load", "Month_cos", "Month_sin", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Season_cos", "Season_sin", "Snow_depth", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Weekend", "Wet_bulb_temperature", "Wind_chill", "Wind_chill_isnan", "Wind_speed"], "gamma": 0.8, "max_depth": 8, "num_boost_round": 200, "num_classes": 3, "objective": "multi:softprob", "reg_lambda": 0.8, "subsample": 0.8, "target_cols": ["Final_gen_state"]}
+        
 
         xgb_model = im.xgboostModel(verbose=False)
+
         # xgb_model.build_model(max_depth=6,
         #                     eta=0.07,
         #                     gamma=0.8,
@@ -162,11 +176,7 @@ def main() -> None:
         
 
         xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature')
-
         xgb_model.train_model(weights_data=True)
-
-        path_to_save = THIS_DIR / "../Results/Models" / f"XGB_model_{args.technologies}_{args.initial_state}.pth"
-
         xgb_model.save_model(path_to_save)
 
 
@@ -178,14 +188,14 @@ def main() -> None:
 
         mlp_model = im.MLP(verbose=False)
         # mlp_model.build_model(feature_cols=feature_names,
-                            # target_cols=target_columns,
-                            # num_classes=3,
-                            # hidden_sizes=(128, 128, 64, 32, 32, 32, 32, 32),
-                            # activations=("relu",) * 8)
+        #                     target_cols=target_columns,
+        #                     num_classes=3,
+        #                     hidden_sizes=(128, 128, 64, 32, 32, 32, 32, 32),
+        #                     activations=("relu",) * 8)
         mlp_model.build_model(**build_kw)
 
         mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature')
-        
+
         mlp_model.train_model(**train_kw)
         # mlp_model.train_model(optimizer='adam', 
         #                       loss='cross_entropy',
@@ -201,7 +211,6 @@ def main() -> None:
         #                         lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
 
 
-        path_to_save = THIS_DIR / "../Results/Models" / f"MLP_model_{args.technologies}_{args.initial_state}.pth"
         mlp_model.save_model(path_to_save)
         print(mlp_model.val_loss)
 

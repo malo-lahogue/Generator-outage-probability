@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     # Problem params
     p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
     p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
+    p.add_argument("--states", type=str, default="all", help="States (geographical) to filter on.")
+
 
     # Grid search params
     p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log")# .csv added later
@@ -84,27 +86,27 @@ def main() -> None:
 
     # I/O prep
     ensure_inputs_exist(args.failures, args.weather, args.powerload)
-    print(f"Grid search for transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators.")
+    args.states = args.states.replace('_', ' ')
+    print(f"Grid search for transition probabilities starting with {args.models} from state {args.initial_state} for {args.technologies} generators in state {args.states}.")
 
     # ---------- Get feature set ----------
     feature_names = load_feature_bases(args.weather, args.powerload)
     print(f"{len(feature_names)} initial features: {feature_names}")
 
-    technologies = {'nuclear': ['Nuclear'],
-                    'hydro': ['Pumped Storage/Hydro'],
-                    'geothermal': ['Geothermal'],
-                    'thermal': ['CC GT units ', 
-                                'CC steam units', 
-                                'Co-generator Block ', 
-                                'CoG GT units', 
-                                'CoG steam units ', 
-                                'Combined Cycle Block', 
-                                'Fluidized Bed', 'Fossil-Steam', 
-                                'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
-                                'Gas Turbine/Jet Engine with HSRG', 
-                                'Internal Combustion/Reciprocating Engines',
-                                'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
-    
+    # technologies = {'nuclear': ['Nuclear'],
+    #                 'hydro': ['Pumped Storage/Hydro'],
+    #                 'geothermal': ['Geothermal'],
+    #                 'thermal': ['CC GT units ', 
+    #                             'CC steam units', 
+    #                             'Co-generator Block ', 
+    #                             'CoG GT units', 
+    #                             'CoG steam units ', 
+    #                             'Combined Cycle Block', 
+    #                             'Fluidized Bed', 'Fossil-Steam', 
+    #                             'Gas Turbine/Jet Engine (Simple Cycle Operation)', 
+    #                             'Gas Turbine/Jet Engine with HSRG', 
+    #                             'Internal Combustion/Reciprocating Engines',
+    #                             'Multi-boiler/Multi-turbine']}.get(args.technologies.lower(), None)
     technologies = ['Gas Turbine/Jet Engine (Simple Cycle Operation)']
 
     if technologies is None:
@@ -114,15 +116,20 @@ def main() -> None:
 
     # ---------- Merge + label prep ----------
     train_val_df, test_df, feature_names, target_columns, integer_encoding = im.preprocess_data(failure_data_path=args.failures,
-                                                                                weather_data_path=args.weather,
-                                                                                power_load_data_path=args.powerload,
-                                                                                feature_names=feature_names,
-                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
-                                                                                state_one_hot=True,
-                                                                                initial_MC_state_filter=args.initial_state,
-                                                                                technology_filter=technologies,
-                                                                                test_periods=test_periods
-                                                                                )
+                                                                                                weather_data_path=args.weather,
+                                                                                                power_load_data_path=args.powerload,
+                                                                                                feature_names=feature_names,
+                                                                                                cyclic_features=["Season", "Month", "DayOfWeek", "DayOfYear"],
+                                                                                                state_filter = args.states,
+                                                                                                state_one_hot=True,
+                                                                                                initial_MC_state_filter=args.initial_state,
+                                                                                                technology_filter=technologies,
+                                                                                                technology_one_hot=True,
+                                                                                                test_periods=test_periods,
+                                                                                                dropNA = True,
+                                                                                                feature_na_drop_threshold = 0.2,
+                                                                                                keep_initial_state = False,
+                                                                                                )
     
 
     # subset_length = 100
@@ -133,6 +140,7 @@ def main() -> None:
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
     exclude = {"Holiday", "Weekend", "Season", "Month", "DayOfWeek", "DayOfYear"}
     stand_cols = [f for f in feature_names if not f.startswith("State_") and not f.startswith("Technology_") and not f.endswith("_isnan") and not f.endswith("_sin") and not f.endswith("_cos") and f not in exclude]
+
     print(f"Standardized features ({len(stand_cols)}): {stand_cols}")
 
     feature_names.sort()
@@ -163,7 +171,7 @@ def main() -> None:
                         "gamma":       [0.4, 0.6, 0.8], #[0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
                         "reg_lambda":  [0.4,  0.6,  0.8],
                         "subsample"       : [0.7, 0.8, 0.9],
-                        "num_boost_round" : [100, 200, 500, 800] #[100, 200, 500]
+                        "num_boost_round" : [100, 200] #[100, 200, 500, 800]
                         }
 
     xgb_common_train = {
@@ -179,16 +187,16 @@ def main() -> None:
     }
     mlp_build_grid = {
         "hidden_sizes": [
-                        (256, 512, 256, 128, 64),
-                        # (512, 512, 256, 128, 64),
-                        # (128, 128, 128, 128, 64),
-                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,)
-                        # (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, )
+                        # (256, 512, 256, 128, 64), # 5 layers
+                        # (512, 512, 256, 128, 64), # 5 layers
+                        # (128, 128, 128, 128, 64), # 5 layers
+                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,) # 12 layers
+                        (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, ) # 10 layers
                         ],
         "activations": [
-                        ("relu",) * 5,
-                        # ("relu",) * 10,
+                        # ("relu",) * 5,
                         # ("relu",) * 12,
+                        ("relu",) * 10,
                         ],
     }
     mlp_common_train =  {
@@ -204,9 +212,9 @@ def main() -> None:
                         }
     
     mlp_train_grid = {
-                    "lambda_reg"          : [5e-2, 1e-3, 5e-3], # 1e-3
                     "epochs"              : [2000],   # upper bound — levels will cap
                     "batch_size"          : [512],
+                    "lambda_reg"          : [5e-2, 1e-3, 5e-3], # 1e-3
                     "lr"                  : [2e-4, 4e-4, 1e-3, 2e-3, 4e-3, 7e-3],
                     "patience"            : [20],
                     "min_delta"           : [5e-5],
@@ -218,7 +226,7 @@ def main() -> None:
                     }
     #                 Stop only when BOTH conditions hold:
     #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
-    #                   • Flat-window: variability in last `flat_patience` epochs <= flat_delta (abs or relative).
+    #                   • Flat-window: range in last `flat_patience` epochs <= flat_delta (abs or relative).
 
 
     # Choose models from CLI
@@ -270,7 +278,7 @@ def main() -> None:
         model_specs=model_specs,
         data=train_val_df,
         standardize=stand_cols,
-        result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.technologies}_{args.initial_state}"+".csv",
+        result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.states}_{args.technologies}_{args.initial_state}"+".csv",
         train_ratio=1.0 - args.val_frac,
         val_ratio=args.val_frac,
         val_metric_per_model=val_metric,
