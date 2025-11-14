@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# ── Environment settings (must come before heavy libs) ───────────────────────────
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MKL_SERVICE_FORCE_INTEL", "1")
+
 # ── Standard Library ────────────────────────────────────────────────────────────
 import csv
 import datetime
@@ -7,41 +14,30 @@ import importlib
 import itertools
 import json
 import math
-import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("MKL_SERVICE_FORCE_INTEL", "1")
 import pickle
 import warnings
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable,Literal, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Any, Callable, Dict, Iterable, Literal, List,
+    Optional, Sequence, Tuple, Union
+)
 
-
-# ── Third-Party ────────────────────────────────────────────────────────────────
+# ── Third-Party: Core scientific stack ──────────────────────────────────────────
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from tqdm import tqdm
 
-# 1) PyTorch first
+# ── PyTorch (must precede sklearn sometimes for MKL thread settings) ────────────
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 torch.set_num_threads(1)
 
-# 2) Then numpy/pandas/sklearn
-import numpy as np
-import pandas as pd
+# ── Scikit-Learn ────────────────────────────────────────────────────────────────
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import KernelDensity
 
-
-# 3) Finally xgboost and the rest
+# ── XGBoost ─────────────────────────────────────────────────────────────────────
 import xgboost as xgb
 
 
@@ -237,7 +233,7 @@ class GeneratorFailureProbabilityInference:
                 ds["Data_weight"] = 1.0
             ds.loc[train_idx, "Data_weight"] = (
                 ds.loc[train_idx, "Data_weight"].to_numpy() * interp_weights
-            )
+            ).astype(np.float32)
 
         # --- standardization setup ---
         self.scaler_feature = None
