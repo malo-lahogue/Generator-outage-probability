@@ -16,7 +16,7 @@ import pickle
 import warnings
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable,Literal, List, Optional, Sequence, Tuple, Union
 
 
 # ── Third-Party ────────────────────────────────────────────────────────────────
@@ -296,7 +296,7 @@ class GeneratorFailureProbabilityInference:
         # --- construct train / val splits ---
         if self.__class__.__name__ == "MLP":
             # use torch Dataset wrapper for MLP
-            ds_torch = OptSurrogateDataset(
+            ds_torch = GeneratorDataset(
                 ds,
                 feature_cols=list(self.feature_cols),   # type: ignore[arg-type]
                 target_cols=list(self.target_cols),     # type: ignore[arg-type]
@@ -788,124 +788,84 @@ class GeneratorFailureProbabilityInference:
             y_pred = y_pred.reshape(y_pred.shape[0], -1)
         return y_pred.squeeze()
     
-class OptSurrogateDataset(Dataset):
+class GeneratorDataset(Dataset):
     """
-    Lightweight Dataset wrapper producing (X, y, w) triples.
+    Dataset returning consistent (X, y, w) triples.
 
-    Supports:
-    - Tabular features: shape (N, D)
-    - Sequence features: shape (N, T, D_t)
-    - Same for targets.
+    Modes
+    -----
+    classification:
+        - target_cols = exactly one column (integer codes)
+        - y is a scalar int64 per sample
 
-    No assumptions about number of classes or regression vs classification.
-    The model controls output interpretation.
+    regression:
+        - target_cols = one or more float columns
+        - y is float32 vector per sample
     """
 
     def __init__(
-        self,
-        df: pd.DataFrame,
-        feature_cols: Sequence[Union[str, Sequence[str]]],
-        target_cols: Sequence[Union[str, Sequence[str]]],
-    ) -> None:
-
+                self,
+                df: pd.DataFrame,
+                feature_cols: list[str],
+                target_cols: list[str],
+                problem_type: str = "classification",
+                num_classes: int = 1,
+                ):
         if not isinstance(df, pd.DataFrame):
             raise TypeError("df must be a pandas DataFrame.")
 
-        if not feature_cols or not target_cols:
-            raise ValueError("feature_cols and target_cols must be non-empty.")
+        if len(feature_cols) == 0:
+            raise ValueError("feature_cols must be non-empty.")
+        if len(target_cols) == 0:
+            raise ValueError("target_cols must be non-empty.")
 
-        # ------------------------------------------------------------
-        #                        BUILD X
-        # ------------------------------------------------------------
-        if isinstance(feature_cols[0], (list, tuple)):
-            # ---------- SEQUENCE MODE ----------
-            seq_len = len(feature_cols)
-            input_size = len(feature_cols[0])
+        self.problem_type = problem_type
+        self.feature_cols = feature_cols
+        self.target_cols = target_cols
+        self.num_classes = num_classes
 
-            # validate structure
-            for tcols in feature_cols:
-                if len(tcols) != input_size:
-                    raise ValueError("All timesteps in feature_cols must have the same length.")
-                missing = [c for c in tcols if c not in df.columns]
-                if missing:
-                    raise KeyError(f"Missing feature columns at timestep: {missing}")
+        # ---- feature matrix ----
+        missing = [c for c in feature_cols if c not in df.columns]
+        if missing:
+            raise KeyError(f"Missing feature columns: {missing}")
 
-            X = np.empty((len(df), seq_len, input_size), dtype=np.float32)
-            for t, tcols in enumerate(feature_cols):
-                X[:, t, :] = df[tcols].to_numpy(dtype=np.float32)
+        self.X = df[feature_cols].to_numpy(dtype=np.float32)
 
-        else:
-            # ---------- TABULAR MODE ----------
-            missing = [c for c in feature_cols if c not in df.columns]
-            if missing:
-                raise KeyError(f"Missing feature columns: {missing}")
-            X = df[list(feature_cols)].to_numpy(dtype=np.float32)
+        # ---- targets ----
+        missing = [c for c in target_cols if c not in df.columns]
+        if missing:
+            raise KeyError(f"Missing target columns: {missing}")
 
-        self.X = X
+        if problem_type == "classification":
+            if len(target_cols) != 1:
+                raise ValueError(
+                    "classification mode requires exactly ONE integer-coded target column."
+                )
+            y = df[target_cols[0]].astype(np.int64).to_numpy()
+        else:  # regression
+            y = df[target_cols].to_numpy(dtype=np.float32)
 
-        # ------------------------------------------------------------
-        #                        BUILD y
-        # ------------------------------------------------------------
-        if isinstance(target_cols[0], (list, tuple)):
-            # ---------- SEQUENCE TARGET ----------
-            seq_len = len(target_cols)
-            out_size = len(target_cols[0])
+        self.y = y
 
-            for tcols in target_cols:
-                if len(tcols) != out_size:
-                    raise ValueError("All timesteps in target_cols must have the same length.")
-                missing = [c for c in tcols if c not in df.columns]
-                if missing:
-                    raise KeyError(f"Missing target columns at timestep: {missing}")
-
-            # dtype depends on data: int → classification, float → regression
-            sample_dtype = df[target_cols[0][0]].dtype
-            y_dtype = np.int64 if np.issubdtype(sample_dtype, np.integer) else np.float32
-
-            Y = np.empty((len(df), seq_len, out_size), dtype=y_dtype)
-            for t, tcols in enumerate(target_cols):
-                Y[:, t, :] = df[tcols].to_numpy(dtype=y_dtype)
-
-        else:
-            # ---------- TABULAR TARGET ----------
-            missing = [c for c in target_cols if c not in df.columns]
-            if missing:
-                raise KeyError(f"Missing target columns: {missing}")
-
-            sample_dtype = df[target_cols[0]].dtype
-            y_dtype = np.int64 if np.issubdtype(sample_dtype, np.integer) else np.float32
-
-            # Keep 2D shape if multi-target regression/classification
-            Y = df[list(target_cols)].to_numpy(dtype=y_dtype)
-
-        self.y = Y
-
-        # ------------------------------------------------------------
-        #                       BUILD w
-        # ------------------------------------------------------------
+        # ---- weights ----
         if "Data_weight" in df.columns:
-            self.train_weights = df["Data_weight"].to_numpy(dtype=np.float32)
+            self.w = df["Data_weight"].to_numpy(dtype=np.float32)
         else:
-            self.train_weights = np.ones(len(df), dtype=np.float32)
+            self.w = np.ones(len(df), dtype=np.float32)
 
-    # ------------------------------------------------------------
-    #                 PyTorch Dataset API
-    # ------------------------------------------------------------
-    def __len__(self) -> int:
-        return self.X.shape[0]
+    def __len__(self):
+        return len(self.X)
 
     def __getitem__(self, idx: int):
-        x = torch.as_tensor(self.X[idx], dtype=torch.float32)
-        y = torch.as_tensor(self.y[idx])
+        x = torch.tensor(self.X[idx], dtype=torch.float32)
 
-        # maintain dtype: int64 = classification, float32 = regression
-        if y.dtype == torch.int64 and y.numel() != 1:
-            raise ValueError(
-                "Classification expects single integer label per sample. "
-                f"Got target shape {tuple(y.shape)}"
-            )
+        # scalar index for classification
+        if self.problem_type == "classification":
+            y = torch.tensor(int(self.y[idx]), dtype=torch.int64)
+        else:
+            y = torch.tensor(self.y[idx], dtype=torch.float32)
 
-        w = torch.as_tensor(self.train_weights[idx], dtype=torch.float32)
+        w = torch.tensor(self.w[idx], dtype=torch.float32)
         return x, y, w
 
 class EarlyStopper:
@@ -1029,23 +989,30 @@ class EarlyStopper:
         return self.best_state
 
 
-
-
-
 class MLP(GeneratorFailureProbabilityInference):
     """
-        Multi-Layer Perceptron surrogate (PyTorch).
+    Multi-Layer Perceptron surrogate (PyTorch).
 
-        Provides:
-        - Flexible architecture construction.
-        - Loss-aware training with optional L1/L2 regularization and sample weights.
-        - Predict that honors any standardization set in `prepare_data`.
+    Two main modes:
+    - classification  (default): multi-class with CrossEntropyLoss
+        * num_classes > 1
+        * target_cols must contain exactly ONE integer-coded column (e.g. Final_gen_state in {0,1,2})
+        * output dim = num_classes
+        * predict() returns class probabilities (softmax over logits)
+
+    - regression:
+        * num_classes should be 1
+        * output dim = len(target_cols)
+        * predict() returns raw outputs (optionally inverse-transformed if scaler_target is set)
     """
 
     def __init__(self, verbose: bool = True):
         super().__init__(verbose=verbose)
         self.model = None
         self.val_loss: list[float] = []
+
+        self.problem_type: str = ""  # set in build_model
+        self.num_classes: int = 1
 
         self.pytorch_activation_functions = {
             'relu': nn.ReLU,
@@ -1063,10 +1030,11 @@ class MLP(GeneratorFailureProbabilityInference):
         self,
         feature_cols: list[str],
         target_cols: list[str],
-        num_classes: int,
         hidden_sizes: Tuple[int, ...],
         activations: Tuple[str, ...],
+        num_classes: int=None,
         out_act_fn: Optional[str] = None,
+        problem_type: Literal["classification", "regression"] = "classification",
         ) -> None:
         """
         Build the MLP computation graph.
@@ -1083,32 +1051,61 @@ class MLP(GeneratorFailureProbabilityInference):
         """
         self.feature_cols = feature_cols
         self.target_cols = target_cols
-        self.num_classes = num_classes
+        self.num_classes = int(num_classes)
         self.hidden_sizes = hidden_sizes
         self.activations = activations
-
-        in_dim = len(self.feature_cols)
-        out_dim = len(self.target_cols)*num_classes
+        self.problem_type = problem_type
 
         if len(hidden_sizes) != len(activations):
             raise ValueError("hidden_sizes and activations must have the same length.")
+
+        if problem_type == "classification":
+            if self.num_classes <= 1:
+                raise ValueError("classification mode requires num_classes > 1.")
+            if len(self.target_cols) != 1:
+                raise ValueError(
+                    "classification mode with CrossEntropy requires exactly one "
+                    "integer-coded target column (e.g. ['Final_gen_state'])."
+                )
+            # logits per class
+            out_dim = self.num_classes
+            if out_act_fn is not None:
+                raise ValueError(
+                    "Do not set out_act_fn when using classification/CrossEntropy "
+                    "(CrossEntropyLoss expects raw logits)."
+                )
+        elif problem_type == "regression":
+            if self.num_classes != 1:
+                raise ValueError("regression mode expects num_classes == 1.")
+            out_dim = len(self.target_cols)
+        else:
+            raise ValueError("problem_type must be 'classification' or 'regression'.")
+
+        in_dim = len(self.feature_cols)
 
         model = nn.Sequential()
         last_dim = in_dim
         for l, (h, act_name) in enumerate(zip(hidden_sizes, activations)):
             if act_name not in self.pytorch_activation_functions:
                 raise KeyError(f"Unknown activation '{act_name}'.")
-            model.add_module(f'linear_{l}', nn.Linear(last_dim, h))
-            model.add_module(f'activation_{l}', self.pytorch_activation_functions[act_name]())
+            model.add_module(f"linear_{l}", nn.Linear(last_dim, h))
+            model.add_module(f"activation_{l}", self.pytorch_activation_functions[act_name]())
             last_dim = h
 
         model.add_module('linear_out', nn.Linear(last_dim, out_dim))
+        #  output activation only for regression/BCE-style tasks
         if out_act_fn is not None:
             if out_act_fn not in self.pytorch_activation_functions:
                 raise KeyError(f"Unknown out_act_fn '{out_act_fn}'.")
-            model.add_module('out_activation', self.pytorch_activation_functions[out_act_fn]())
+            if problem_type == "classification":
+                raise ValueError(
+                    "out_act_fn must be None for classification with cross_entropy "
+                    "(we need raw logits)."
+                )
+            model.add_module("out_activation", self.pytorch_activation_functions[out_act_fn]())
 
         self.model = model
+        
 
         # record rebuild spec
         self._build_spec = {
@@ -1120,71 +1117,104 @@ class MLP(GeneratorFailureProbabilityInference):
                 "hidden_sizes": hidden_sizes,
                 "activations": activations,
                 "out_act_fn": out_act_fn,
+                "problem_type": problem_type,
             },
         }
 
-        self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.num_parameters = sum(
+            p.numel() for p in self.model.parameters() if p.requires_grad
+        )
         if self.verbose:
             print(self.model)
-            print(f"Input dim: {in_dim} | Output dim: {out_dim} | Trainable params: {self.num_parameters:,}")
+            print(
+                f"Input dim: {in_dim} | Output dim: {out_dim} | "
+                f"Trainable params: {self.num_parameters:,}"
+            )
 
-    def _make_loss(self, loss_name: str, weighted: bool):
-        reduction = 'none' if weighted else 'mean'
+    def _make_loss(self, loss_name: str):
+        """
+        Return a PyTorch loss with reduction='none', so we always get
+        per-sample losses and can handle weighting ourselves.
+
+        Supported:
+        - 'mse', 'mae'           : regression
+        - 'logloss'              : binary classification (BCE-with-logits)
+        - 'cross_entropy'        : multi-class classification (logits)
+        """
         loss_name = loss_name.lower()
-        if loss_name == 'mse':
-            return nn.MSELoss(reduction=reduction)
-        if loss_name == 'mae':
-            return nn.L1Loss(reduction=reduction)
-        if loss_name == 'logloss':
-            return nn.BCELoss(reduction=reduction)  # expects probs in [0,1]
-        if loss_name == 'cross_entropy':
-            return nn.CrossEntropyLoss(reduction=reduction)  # expects logits + class indices
+        if loss_name == "mse":
+            return nn.MSELoss(reduction="none")
+        if loss_name == "mae":
+            return nn.L1Loss(reduction="none")
+        if loss_name == "logloss":
+            return nn.BCEWithLogitsLoss(reduction='none')  # expects logits, applies sigmoid internally
+        if loss_name == "cross_entropy":
+            return nn.CrossEntropyLoss(reduction="none")  # logits + class indices
         raise ValueError(f"Unknown loss '{loss_name}'")
-
-    def train_model(self,
-                optimizer: Literal['adam','sgd','rmsprop']='adam',
-                loss: Literal['mse','mae','logloss','cross_entropy']='mse',
-                regularization_type='L2', lambda_reg=1e-3,
-                epochs: int = 200, batch_size: int = 200, lr: float = 1e-3,
-                weights_data: bool = False,
-                device: str = 'cpu',
-                # smart early stopping
-                early_stopping: bool = True,
-                patience: int = 20, min_delta: float = 0.0,
-                flat_delta: float | None = None,
-                flat_patience: int | None = None,
-                flat_mode: str = "range",          # or "iqr"
-                rel_flat: float | None = 2e-3,
-                burn_in: int = 10,
-                # stability & scheduling
-                grad_clip_norm: Optional[float] = None,
-                lr_scheduler: Optional[Literal['plateau','cosine','onecycle']] = None,
-                scheduler_kwargs: Optional[dict] = None) -> None:
+    
+    def train_model(
+        self,
+        optimizer: Literal["adam", "sgd", "rmsprop"] = "adam",
+        loss: Literal["mse", "mae", "logloss", "cross_entropy"] = "cross_entropy",
+        regularization_type: Optional[str] = "L2",
+        lambda_reg: float | list[float] = 1e-3,
+        epochs: int = 200,
+        batch_size: int = 200,
+        lr: float = 1e-3,
+        weights_data: bool = False,
+        device: str = "cpu",
+        # smart early stopping
+        early_stopping: bool = True,
+        patience: int = 20,
+        min_delta: float = 0.0,
+        flat_delta: float | None = None,
+        flat_patience: int | None = None,
+        flat_mode: str = "range",  # or "iqr"
+        rel_flat: float | None = 2e-3,
+        burn_in: int = 10,
+        # stability & scheduling
+        grad_clip_norm: Optional[float] = None,
+        lr_scheduler: Optional[Literal["plateau", "cosine", "onecycle"]] = None,
+        scheduler_kwargs: Optional[dict] = None,
+    ) -> None:
         """
-            Train the MLP with optional data weights, smart early stopping, grad clipping,
-            and LR scheduling.
+        Train the MLP with optional data weights, smart early stopping, grad clipping,
+        and LR scheduling.
 
-            INPUTS:
-            - optimizer (str): {'adam','sgd','rmsprop'}.
-            - loss (str): {'mse','mae','logloss','cross_entropy'}.
-            - regularization_type (str|None): 'L1', 'L2', or None.
-            - lambda_reg (float|list[float]): Scalar or per-epoch strengths (len == epochs).
-            - weights_data (bool): Use 'Data_weight' from Dataset in loss reduction.
-            - epochs (int): Number of epochs.
-            - batch_size (int): Batch size.
-            - lr (float): Learning rate.
-            - device (str): 'cpu' or 'cuda'.
-
-            OUTPUTS:
-            - None
+        Parameters
+        ----------
+        optimizer : {'adam','sgd','rmsprop'}
+        loss : {'mse','mae','logloss','cross_entropy'}
+            For classification (problem_type='classification'), must be 'cross_entropy'.
+        regularization_type : {'L1','L2',None}
+        lambda_reg : float | list[float]
+            Scalar or per-epoch strengths (len == epochs) if regularization_type is not None.
+        epochs : int
+        batch_size : int
+        lr : float
+        device : str
+            'cpu' or 'cuda'.
         """
-        print("Starting MLP training...")
+
+        # --- consistency checks between problem_type and loss ---
+        if self.problem_type == "classification" and loss != "cross_entropy":
+            raise ValueError(
+                "For classification mode, you must use loss='cross_entropy' "
+                "(targets are integer class indices)."
+            )
+        if self.problem_type == "regression" and loss == "cross_entropy":
+            raise ValueError(
+                "cross_entropy loss is only valid for classification mode."
+            )
+
         # --- regularization schedule ---
         if regularization_type is not None and not (
             (isinstance(lambda_reg, (float, int)) and float(lambda_reg) > 0.0)
             or (isinstance(lambda_reg, list) and len(lambda_reg) > 0)
         ):
-            raise ValueError("With regularization, lambda_reg must be > 0 (float) or a non-empty list.")
+            raise ValueError(
+                "With regularization, lambda_reg must be > 0 (float) or a non-empty list."
+            )
 
         if isinstance(lambda_reg, (float, int)):
             lambda_reg_arr = np.full(epochs, float(lambda_reg), dtype=np.float32)
@@ -1200,41 +1230,58 @@ class MLP(GeneratorFailureProbabilityInference):
         self.loss_fn_name = loss
         self.model.to(device)
         self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
         train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
-        val_loader   = DataLoader(self.val_data,   batch_size=batch_size, shuffle=False)
-        loss_fn = self._make_loss(loss, weighted=weights_data)
+        val_loader = DataLoader(self.val_data, batch_size=batch_size, shuffle=False)
+        loss_fn = self._make_loss(loss)
         optim = self.pytorch_optimizers[optimizer](self.model.parameters(), lr=lr)
 
         # --- LR scheduler (optional) ---
         scheduler = None
         scheduler_kwargs = scheduler_kwargs or {}
-        if lr_scheduler == 'plateau':
+        if lr_scheduler == "plateau":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optim, mode='min',
-                factor=scheduler_kwargs.get('factor', 0.5),
-                patience=scheduler_kwargs.get('patience', 5),
-                cooldown=scheduler_kwargs.get('cooldown', 0),
-                min_lr=scheduler_kwargs.get('min_lr', 1e-6)
+                optim,
+                mode="min",
+                factor=scheduler_kwargs.get("factor", 0.5),
+                patience=scheduler_kwargs.get("patience", 5),
+                cooldown=scheduler_kwargs.get("cooldown", 0),
+                min_lr=scheduler_kwargs.get("min_lr", 1e-6),
             )
-        elif lr_scheduler == 'cosine':
+        elif lr_scheduler == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optim, T_max=max(1, epochs)
             )
-        elif lr_scheduler == 'onecycle':
+        elif lr_scheduler == "onecycle":
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optim, max_lr=lr,
-                steps_per_epoch=max(1, len(train_loader)), epochs=epochs
+                optim,
+                max_lr=lr,
+                steps_per_epoch=max(1, len(train_loader)),
+                epochs=epochs,
             )
 
         # --- weighted reduction helper ---
         def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
-            # tensor: [B] or [B, ...] -> mean over feature dims to per-sample, then (weighted) mean over batch
+            """
+            Convert elementwise loss to a scalar:
+
+            - tensor: [B] or [B, ...]
+            - w: per-sample weights of shape [B] or None
+
+            1) If tensor has extra dims, mean over them -> [B]
+            2) If weights are provided, do weighted mean over batch
+            else, simple mean over batch.
+            """
+            # tensor: [B] or [B, ...] -> per-sample mean over feature dims, then (weighted) mean over batch
             if tensor.ndim > 1:
-                per_sample = tensor.view(tensor.size(0), -1).mean(dim=1)
+                per_sample = tensor.view(tensor.size(0), -1).mean(dim=1)  # [B]
             else:
-                per_sample = tensor
+                per_sample = tensor  # [B]
+
             if w is None:
                 return per_sample.mean()
+
+            w = w.to(per_sample.dtype)
             denom = torch.clamp(w.sum(), min=1e-12)
             return (per_sample * w).sum() / denom
 
@@ -1254,14 +1301,14 @@ class MLP(GeneratorFailureProbabilityInference):
                     xb = xb.to(device)
                     yb = yb.to(device)
 
-                    # Targets: [B] long
-                    if yb.ndim != 1:
-                        yb = yb.view(-1)
-                    yb = yb.long()
+                    # classification: yb should be [B] of class indices
+                    if loss.lower() == 'cross_entropy':
+                        if yb.ndim != 1:
+                            yb = yb.view(-1)
+                        yb = yb.long()
 
-
-                    yhat = self.model(xb)
-                    elem = loss_fn(yhat, yb)                # elementwise loss
+                    yhat = self.model(xb)             # logits or continuous output
+                    elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
                     loss_val = _reduce_elemwise_loss(elem, wb)
 
                     # regularization
@@ -1285,14 +1332,20 @@ class MLP(GeneratorFailureProbabilityInference):
             return total / max(1, n)
 
         # --- early stopper ---
-        stopper = EarlyStopper(min_delta=min_delta, patience=patience, burn_in=burn_in,
-                            flat_delta=flat_delta, flat_patience=flat_patience,
-                            flat_mode=flat_mode, rel_flat=rel_flat)
+        stopper = EarlyStopper(
+            min_delta=min_delta,
+            patience=patience,
+            burn_in=burn_in,
+            flat_delta=flat_delta,
+            flat_patience=flat_patience,
+            flat_mode=flat_mode,
+            rel_flat=rel_flat,
+        )
 
         # --- training loop ---
         for ep in range(1, epochs + 1):
             train_loss = step(train_loader, True, ep)
-            val_loss   = step(val_loader,   False, ep)
+            val_loss = step(val_loader, False, ep)
             self.val_loss.append(val_loss)
 
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -1300,8 +1353,10 @@ class MLP(GeneratorFailureProbabilityInference):
             elif scheduler is not None:
                 scheduler.step()
 
-            if self.verbose:# and (ep % 10 == 0 or ep == 1):
-                print(f"Epoch {ep:03d}: train={train_loss:.4e} | val={val_loss:.4e}")
+            if self.verbose:
+                print(
+                    f"Epoch {ep:03d}: train={train_loss:.4e} | val={val_loss:.4e}"
+                )
 
             if early_stopping and stopper.step(val_loss, model=self.model):
                 if self.verbose:
@@ -1334,11 +1389,10 @@ class MLP(GeneratorFailureProbabilityInference):
         """
         Predict targets for new inputs, honoring training-time standardization.
 
-        INPUTS:
-        - X (pd.DataFrame) : Inputs in original (non-standardized) scale; must contain `self.feature_cols`.
-
-        OUTPUTS:
-        - y_pred (np.ndarray) : Predictions in original scale, shape (N, T).
+        For classification:
+            - returns class probabilities of shape (N, num_classes).
+        For regression:
+            - returns raw outputs of shape (N, len(target_cols)), optionally inverse-transformed.
         """
         if self.model is None:
             raise ValueError("Model not built. Call build_model first.")
@@ -1348,26 +1402,46 @@ class MLP(GeneratorFailureProbabilityInference):
 
         # standardize selected features
         if self.standardize is True and self.scaler_feature is not None:
-            X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(X_df[self.feature_cols].to_numpy())
-            stand_targets = list(self.target_cols)  # all will be inverse-transformed
+            X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(
+                X_df[self.feature_cols].to_numpy()
+            )
+            stand_targets = list(self.target_cols)  # for regression only
         elif isinstance(self.standardize, list) and self.scaler_feature is not None:
-            stand_feat = [c for c in self.feature_cols if c in self.standardize and c in X_df.columns]
-            X_df.loc[:, stand_feat] = self.scaler_feature.transform(X_df[stand_feat])
+            stand_feat = [
+                c
+                for c in self.feature_cols
+                if c in self.standardize and c in X_df.columns
+            ]
+            X_df.loc[:, stand_feat] = self.scaler_feature.transform(
+                X_df[stand_feat].to_numpy()
+            )
             stand_targets = [c for c in self.target_cols if c in self.standardize]
         else:
             stand_targets = []
 
         X_np = X_df[self.feature_cols].to_numpy(dtype=np.float32)
-        pred_logits = self.model(torch.tensor(X_np, dtype=torch.float32, device=device)).detach().cpu().numpy()
+        logits_or_out = (
+            self.model(
+                torch.tensor(X_np, dtype=torch.float32, device=device)
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-        # inverse-transform targets if we standardized them
+        if self.problem_type == "classification":
+            # probabilities over classes
+            y_pred = torch.softmax(torch.tensor(logits_or_out), dim=1).numpy()
+            return y_pred
+
+        # regression: optionally inverse-transform targets
+        y_pred = logits_or_out
         if self.scaler_target is not None and stand_targets:
-            y_df = pd.DataFrame(pred_logits, columns=self.target_cols)
-            y_df.loc[:, stand_targets] = self.scaler_target.inverse_transform(y_df[stand_targets].to_numpy())
-            pred_logits = y_df[self.target_cols].to_numpy(dtype=np.float32)
-        
-        y_pred = torch.softmax(torch.tensor(pred_logits), dim=1).numpy()
-
+            y_df = pd.DataFrame(y_pred, columns=self.target_cols)
+            y_df.loc[:, stand_targets] = self.scaler_target.inverse_transform(
+                y_df[stand_targets].to_numpy()
+            )
+            y_pred = y_df[self.target_cols].to_numpy(dtype=np.float32)
         return y_pred
 
     # ---------------------- Save / Load ----------------------
@@ -1375,12 +1449,6 @@ class MLP(GeneratorFailureProbabilityInference):
     def save_model(self, model_path: str) -> None:
         """
         Save a self-describing checkpoint that can rebuild the model and restore metadata.
-
-        INPUTS:
-        - model_path (str) : Destination path.
-
-        OUTPUTS:
-        - None : Writes a single file with tensors + metadata.
         """
         if self.model is None:
             raise ValueError("No model to save. Did you call build_model()?")
@@ -1402,7 +1470,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 "torch": torch.__version__,
                 "numpy": np.__version__,
                 "pandas": pd.__version__,
-                "sklearn": StandardScaler.__module__.split('.')[0],
+                "sklearn": StandardScaler.__module__.split(".")[0],
             },
             "model": {
                 "module": self.__class__.__module__,
@@ -1414,8 +1482,14 @@ class MLP(GeneratorFailureProbabilityInference):
                 "feature_cols": getattr(self, "feature_cols", None),
                 "target_cols": getattr(self, "target_cols", None),
                 "standardize": getattr(self, "standardize", False),
-                "scaler_feature": _pickle_or_none(getattr(self, "scaler_feature", None)),
-                "scaler_target": _pickle_or_none(getattr(self, "scaler_target", None)),
+                "scaler_feature": _pickle_or_none(
+                    getattr(self, "scaler_feature", None)
+                ),
+                "scaler_target": _pickle_or_none(
+                    getattr(self, "scaler_target", None)
+                ),
+                "problem_type": getattr(self, "problem_type", "classification"),
+                "num_classes": getattr(self, "num_classes", 1),
             },
             "train": {
                 "optimizer_name": getattr(self, "optimizer_name", None),
@@ -1429,17 +1503,11 @@ class MLP(GeneratorFailureProbabilityInference):
             print(f"Saved checkpoint to: {model_path}")
 
     @classmethod
-    def load_model(cls, model_path: str, map_location: str = "cpu", verbose: bool = True):
+    def load_model(
+        cls, model_path: str, map_location: str = "cpu", verbose: bool = True
+    ):
         """
         Rebuild an MLP (or subclass) instance from a checkpoint.
-
-        INPUTS:
-        - model_path (str) : Path to saved checkpoint.
-        - map_location (str) : Torch map_location for loading.
-        - verbose (bool) : Print rebuild info.
-
-        OUTPUTS:
-        - obj (MLP | subclass) : Reconstructed object with weights & scalers restored.
         """
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Model file {model_path} does not exist.")
@@ -1459,6 +1527,8 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.feature_cols = data_section.get("feature_cols", None)
         obj.target_cols = data_section.get("target_cols", None)
         obj.standardize = data_section.get("standardize", False)
+        obj.problem_type = data_section.get("problem_type", "classification")
+        obj.num_classes = data_section.get("num_classes", 1)
 
         if not build_spec or "builder" not in build_spec or "kwargs" not in build_spec:
             raise RuntimeError("Invalid or missing build_spec in checkpoint.")
@@ -1476,8 +1546,12 @@ class MLP(GeneratorFailureProbabilityInference):
             except Exception:
                 return None
 
-        obj.scaler_feature = _unpickle_or_none(data_section.get("scaler_feature", None))
-        obj.scaler_target = _unpickle_or_none(data_section.get("scaler_target", None))
+        obj.scaler_feature = _unpickle_or_none(
+            data_section.get("scaler_feature", None)
+        )
+        obj.scaler_target = _unpickle_or_none(
+            data_section.get("scaler_target", None)
+        )
 
         train_section = ckpt.get("train", {})
         obj.optimizer_name = train_section.get("optimizer_name", None)
@@ -1488,11 +1562,12 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.model.eval()
         if verbose:
             print(f"Loaded {class_name} from {model_path}")
-            print(f"Rebuilt with {build_spec['builder']}(**{list(build_spec['kwargs'].keys())})")
+            print(
+                f"Rebuilt with {build_spec['builder']}(**{list(build_spec['kwargs'].keys())})"
+            )
         return obj
 
     # ---------- Numpy loss & helpers for importance ----------
-
     def _gather_val_arrays(self, device=None, loss_name: str = "mse"):
         """
         Collect validation arrays for importance.
@@ -1760,6 +1835,9 @@ class MLP(GeneratorFailureProbabilityInference):
         plt.tight_layout()
         plt.show()
         return imp if return_df else None
+
+
+
 
 
 
