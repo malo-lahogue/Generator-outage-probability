@@ -149,7 +149,6 @@ def preprocess_data(
     weather_df = pd.read_csv(
         weather_data_path,
         parse_dates=["datetime"],
-        usecols=lambda col: col in feature_names + ["datetime", "state"],
     )
     weather_df.columns = [
         (name[0].upper() + name[1:]) if isinstance(name, str) and name else name
@@ -195,11 +194,11 @@ def preprocess_data(
             feature_names.append(isnan_col)
             weather_df[col] = weather_df[col].fillna(0.0)
 
+
     # ----------------- 3) Load power load data -----------------
     power_load_df = pd.read_csv(
         power_load_data_path,
         parse_dates=["UTC time"],
-        usecols=lambda col: col in feature_names + ["UTC time", "State"],
     )
     power_load_df.columns = [
         (name[0].upper() + name[1:]) if isinstance(name, str) and name else name
@@ -245,6 +244,7 @@ def preprocess_data(
 
     merged_data.reset_index(drop=True, inplace=True)
 
+
     # ----------------- 5) Keep only relevant columns & aggregate -----------------
     # We want to aggregate duplicate rows (multiple units) by discrete keys
     # and sum Data_weight.
@@ -281,6 +281,7 @@ def preprocess_data(
         .agg(agg_dict)
         .reset_index(drop=True)
     )
+
 
     # ----------------- 6) State encoding -----------------
     if "State" in merged_data.columns:
@@ -414,6 +415,7 @@ def preprocess_data(
 
     # ----------------- 11) Final column selection & dtypes -----------------
     # Preserve original feature order where possible
+
     feature_names = [f for f in feature_names if f in merged_data.columns]
 
     cols = feature_names + target_columns + ["Data_weight"]
@@ -468,8 +470,10 @@ def preprocess_data(
         test_df = merged_df.iloc[0:0].copy().reset_index(drop=True)
         train_val_df = merged_df.copy().reset_index(drop=True)
 
+
     # Final column ordering for both splits
     train_val_df = train_val_df[cols].copy()
     test_df = test_df[cols].copy()
+
 
     return train_val_df, test_df, feature_names, target_columns, integer_encoding
