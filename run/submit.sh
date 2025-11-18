@@ -21,8 +21,8 @@ source $HOME/venvs/Load_shedding_surrogate_ENV/bin/activate
 
 # python main_mutual_information.py --k_knn 30 --library "npeet" #"npeet" "sklearn"
 # python conditional_mutual_information.py
-# python main_grid_search.py --models mlp --technologies thermal --initial_state U --states New_York --device cuda
-python main_train_model.py --models mlp --technologies thermal --initial_state A --states all --device cuda
+python main_grid_search.py --models mlp --technologies thermal --initial_state A --states California --device cuda
+# python main_train_model.py --models xgb --technologies thermal --initial_state A --states California --device cuda
 
 # California
 # New_York
