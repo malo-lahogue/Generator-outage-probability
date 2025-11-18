@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 # ── PyTorch (must precede sklearn sometimes for MKL thread settings) ────────────
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
 torch.set_num_threads(1)
 
@@ -49,7 +50,37 @@ import xgboost as xgb
 torch.manual_seed(0)
 
 
+def focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    reduction: str = "none"
+):
+    """
+    Multi-class softmax focal loss.
+    - logits: (N, C)
+    - targets: (N,) integer labels in {0,1,2}
+    - alpha: weight for class imbalance
+    - gamma: focusing parameter
+    """
+    # Compute softmax probabilities
+    probs = F.softmax(logits, dim=1)            # (N, C)
+    pt = probs[torch.arange(len(targets)), targets]  # (N,)
 
+    a = alpha[torch.arange(len(targets)), targets]  # (N,)
+
+    # Focal loss formula
+    loss = -a * (1 - pt) ** gamma * torch.log(pt + 1e-12)
+
+    if reduction == "none":
+        return loss
+    elif reduction == "mean":
+        return loss.mean()
+    elif reduction == "sum":
+        return loss.sum()
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
 
 class GeneratorFailureProbabilityInference:
     """
@@ -1147,12 +1178,18 @@ class MLP(GeneratorFailureProbabilityInference):
             return nn.BCEWithLogitsLoss(reduction='none')  # expects logits, applies sigmoid internally
         if loss_name == "cross_entropy":
             return nn.CrossEntropyLoss(reduction="none")  # logits + class indices
+        if loss_name == "focal_loss":
+            return focal_loss
         raise ValueError(f"Unknown loss '{loss_name}'")
     
     def train_model(
         self,
         optimizer: Literal["adam", "sgd", "rmsprop"] = "adam",
-        loss: Literal["mse", "mae", "logloss", "cross_entropy"] = "cross_entropy",
+        loss: Literal["mse", "mae", "logloss", "cross_entropy", "focal_loss"] = "cross_entropy",
+        focal_loss_gamma: float | None = None,
+        focal_loss_gamma_schedule: Optional[str] = None,
+        focal_loss_alpha: float | None = None,
+        focal_loss_alpha_schedule: Optional[str] = None,
         regularization_type: Optional[str] = "L2",
         lambda_reg: float | list[float] = 1e-3,
         epochs: int = 200,
@@ -1194,7 +1231,7 @@ class MLP(GeneratorFailureProbabilityInference):
         """
 
         # --- consistency checks between problem_type and loss ---
-        if self.problem_type == "classification" and loss != "cross_entropy":
+        if self.problem_type == "classification" and loss not in ["cross_entropy", "focal_loss", "logloss"]:
             raise ValueError(
                 "For classification mode, you must use loss='cross_entropy' "
                 "(targets are integer class indices)."
@@ -1257,6 +1294,20 @@ class MLP(GeneratorFailureProbabilityInference):
                 epochs=epochs,
             )
 
+        # ---- focal loss schedule ----
+        if loss.lower() == 'focal_loss' and self.problem_type == 'classification':
+            if focal_loss_gamma is None:
+                raise ValueError("focal_loss_gamma must be provided for focal_loss.")
+            if focal_loss_alpha is None:
+                focal_loss_alpha = 1.0 / self.num_classes
+            if focal_loss_gamma_schedule is not None:
+                raise NotImplementedError("focal_loss_gamma_schedule not implemented yet.")
+            if focal_loss_alpha_schedule is not None:
+                raise NotImplementedError("focal_loss_alpha_schedule not implemented yet.")
+            alphas_focal_ = torch.ones((self.num_classes, epochs), device=device) * focal_loss_alpha
+            gammas_focal_ = torch.ones((1, epochs), device=device) * focal_loss_gamma
+
+
         # --- weighted reduction helper ---
         def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
             """
@@ -1305,7 +1356,18 @@ class MLP(GeneratorFailureProbabilityInference):
                         yb = yb.long()
 
                     yhat = self.model(xb)             # logits or continuous output
-                    elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
+                    if loss.lower() == 'focal_loss':
+                        if train:
+                            # get per-epoch alpha/gamma
+                            a = alphas_focal_[:, epoch-1].repeat(yb.size(0), 1)  # shape [B, num_classes]
+                            g = gammas_focal_[:, epoch-1].repeat(yb.size(0))  # shape [B]
+                        else:
+                            # evaluation: use cross-entropy
+                            a = torch.ones((yb.size(0), self.num_classes), device=device)
+                            g = torch.zeros((yb.size(0),), device=device)
+                        elem = loss_fn(yhat, yb, alpha=a, gamma=g, reduction='none')
+                    else:
+                        elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
                     loss_val = _reduce_elemwise_loss(elem, wb)
 
                     # regularization

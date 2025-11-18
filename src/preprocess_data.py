@@ -249,7 +249,7 @@ def preprocess_data(
     # We want to aggregate duplicate rows (multiple units) by discrete keys
     # and sum Data_weight.
     discrete_keys = ["Datetime_UTC"]
-    if "State" in merged_data.columns:
+    if "State" in merged_data.columns and "State" in feature_names:
         discrete_keys.append("State")
     if initial_MC_state_filter == "all" and "Initial_gen_state" in merged_data.columns:
         discrete_keys.append("Initial_gen_state")
@@ -260,9 +260,9 @@ def preprocess_data(
 
     # Keys we want to keep explicitly before encoding
     feat_keep = ["Datetime_UTC", "Final_gen_state"]
-    if "State" in merged_data.columns:
+    if "State" in merged_data.columns and "State" in feature_names:
         feat_keep.append("State")
-    if "Technology" in merged_data.columns:
+    if "Technology" in merged_data.columns and "Technology" in feature_names:
         feat_keep.append("Technology")
 
     # Add all candidate feature names
