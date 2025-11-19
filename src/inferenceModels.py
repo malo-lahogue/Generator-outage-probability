@@ -1334,10 +1334,6 @@ class MLP(GeneratorFailureProbabilityInference):
                 raise ValueError("focal_loss_gamma must be provided for focal_loss.")
             if focal_loss_alpha is None:
                 focal_loss_alpha = 1.0 / self.num_classes
-            if focal_loss_gamma_schedule is not None:
-                raise NotImplementedError("focal_loss_gamma_schedule not implemented yet.")
-            if focal_loss_alpha_schedule is not None:
-                raise NotImplementedError("focal_loss_alpha_schedule not implemented yet.")
             
             if focal_loss_gamma_schedule == 'constant' or focal_loss_gamma_schedule is None:
                 gammas_focal_ = torch.ones(epochs, device=device).unsqueeze(1) * focal_loss_gamma
