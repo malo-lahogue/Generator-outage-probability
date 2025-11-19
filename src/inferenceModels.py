@@ -1335,7 +1335,7 @@ class MLP(GeneratorFailureProbabilityInference):
             if focal_loss_alpha is None:
                 focal_loss_alpha = 1.0 / self.num_classes
             
-            if focal_loss_gamma_schedule == 'constant' or focal_loss_gamma_schedule is None:
+            if focal_loss_gamma_schedule == 'constant' or focal_loss_gamma_schedule is None or focal_loss_gamma==0.0:
                 gammas_focal_ = torch.ones(epochs, device=device).unsqueeze(1) * focal_loss_gamma
             elif focal_loss_gamma_schedule == 'linear':
                 gammas_focal_ = torch.linspace(focal_loss_gamma, 0.0, epochs, device=device).unsqueeze(1)
@@ -1356,7 +1356,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 alphas_focal_ = torch.tensor(np.array([(a / 2) * (1 + np.cos(np.linspace(0, np.pi, epochs))) for a in focal_loss_alpha]).T, device=device)
             else:
                 raise ValueError(f"Unknown focal_loss_alpha_schedule '{focal_loss_alpha_schedule}'.")
-            
+            print(gammas_focal_.shape, alphas_focal_.shape)
             
 
         # --- weighted reduction helper ---
@@ -1410,14 +1410,14 @@ class MLP(GeneratorFailureProbabilityInference):
                     if loss.lower() == 'focal_loss':
                         if train:
                             # get per-epoch alpha/gamma
-                            a = alphas_focal_[:, epoch-1].repeat(yb.size(0), 1)  # shape [B, num_classes]
-                            g = gammas_focal_[:, epoch-1].repeat(yb.size(0))  # shape [B]
+                            a = alphas_focal_[epoch-1, :].repeat(yb.size(0), 1)  # shape [B, num_classes]
+                            g = gammas_focal_[epoch-1].repeat(yb.size(0))  # shape [B]
                             elem = loss_fn(logits=yhat, targets=yb, alpha=a, gamma=g, reduction='none')
                         else:
                             # evaluation: use cross-entropy
                             a = torch.ones((yb.size(0), self.num_classes), device=device)
                             g = torch.zeros((yb.size(0),), device=device)
-                            yhat = true_prob_focal_loss(yhat, gamma=gammas_focal_[0, epoch-1])
+                            yhat = true_prob_focal_loss(yhat, gamma=gammas_focal_[epoch-1])
                             elem = loss_fn(probs=yhat, targets=yb, alpha=a, gamma=g, reduction='none')
                     else:
                         elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
