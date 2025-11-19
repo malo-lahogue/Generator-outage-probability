@@ -54,11 +54,17 @@ def true_prob_focal_loss(logits:torch.tensor, gamma:float):
     Correct the biased probability estimates from focal loss.
     """
     with torch.no_grad():
+        # assert torch.isfinite(logits).all()
         p = F.softmax(logits, dim=1)
-        denom = (1 - p) ** gamma - gamma * (1 - p) ** (gamma - 1) * p * torch.log(p + 1e-12)
-        p_t = p / denom
-        p_t = p_t / p_t.sum(dim=1, keepdim=True)
-    return p_t
+        p = torch.clamp(p, min=1e-12, max=1.0)  # numerical stability
+        one_minus_p = torch.clamp(1 - p, min=1e-12, max=1.0)
+
+        denom = one_minus_p ** gamma - gamma * one_minus_p ** (gamma - 1) * p * torch.log(p)
+        denom = torch.clamp(denom, min=1e-12)
+        pt = p / denom
+        pt = pt / pt.sum(dim=1, keepdim=True)
+        pt = torch.clamp(pt, min=1e-12, max=1.0)  # numerical stability
+    return pt
 
 
 
@@ -87,9 +93,11 @@ def focal_loss(
         raise ValueError("Provide only one of logits or probs, not both.")
 
     if probs is None:
+        # assert torch.isfinite(logits).all()
         probs = F.softmax(logits, dim=1)            # (N, C)
 
     pt = probs[torch.arange(len(targets)), targets]  # (N,)
+    pt = torch.clamp(pt, min=1e-12, max=1.0)  # numerical stability
 
     a = alpha[torch.arange(len(targets)), targets]  # (N,)
 
@@ -1156,6 +1164,7 @@ class MLP(GeneratorFailureProbabilityInference):
             model.add_module("out_activation", self.pytorch_activation_functions[out_act_fn]())
 
         self.model = model
+        self._init_weights_kaiming()
         
 
         # record rebuild spec
@@ -1181,6 +1190,20 @@ class MLP(GeneratorFailureProbabilityInference):
                 f"Input dim: {in_dim} | Output dim: {out_dim} | "
                 f"Trainable params: {self.num_parameters:,}"
             )
+    
+    def _init_weights_kaiming(self):
+        """Apply Kaiming initialization to all Linear layers."""
+
+        for module in self.model.modules():   # assuming self.model is nn.Sequential
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(
+                    module.weight,
+                    a=0.0,                  # slope for Relu; use 0.01 if LeakyRelu
+                    mode='fan_in',
+                    nonlinearity='relu'
+                )
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
     def _make_loss(self, loss_name: str):
         """
@@ -1358,6 +1381,26 @@ class MLP(GeneratorFailureProbabilityInference):
             else:
                 raise ValueError(f"Unknown focal_loss_alpha_schedule '{focal_loss_alpha_schedule}'.")
             
+            if torch.isnan(gammas_focal_).any():
+                raise ValueError("NaN detected in focal loss gamma schedule.")
+            if torch.isnan(alphas_focal_).any():
+                raise ValueError("NaN detected in focal loss alpha schedule.")
+            if not torch.isfinite(gammas_focal_).all():
+                raise ValueError("Inf detected in focal loss gamma schedule.")
+            if not torch.isfinite(alphas_focal_).all():
+                raise ValueError("Inf detected in focal loss alpha schedule.")
+
+            # Clamp to safe ranges
+            if (gammas_focal_ < 0.0).any():
+                print("Warning: negative gammas detected; clamping to 0.0")
+            gammas_focal_ = torch.clamp(gammas_focal_, min=0.0)
+
+            if (alphas_focal_ < 0.0).any():
+                print("Warning: negative alphas detected; clamping to 0.0")
+            alphas_focal_ = torch.clamp(alphas_focal_, min=0.0)
+
+
+
 
         # --- weighted reduction helper ---
         def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
