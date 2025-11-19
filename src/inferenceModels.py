@@ -1319,7 +1319,9 @@ class MLP(GeneratorFailureProbabilityInference):
         # --- LR scheduler (optional) ---
         scheduler = None
         scheduler_kwargs = scheduler_kwargs or {}
-        if lr_scheduler == "plateau":
+        if lr_scheduler == "constant":
+            scheduler = torch.optim.lr_scheduler.ConstantLR(optim,factor=1.0,total_iters=0)
+        elif lr_scheduler == "plateau":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optim,
                 mode="min",
@@ -1498,10 +1500,25 @@ class MLP(GeneratorFailureProbabilityInference):
         )
 
         # --- training loop ---
+        best_val_loss = float('inf')
+        best_state = None
+        best_epoch = -1
         for ep in range(1, epochs + 1):
             train_loss = step(train_loader, True, ep)
             val_loss = step(val_loader, False, ep)
             self.val_loss.append(val_loss)
+            # --- Detect NaN / Inf / exploding validation loss ---
+            if not torch.isfinite(torch.tensor(val_loss)):
+                print(f"[Early Stop] Non-finite validation loss detected (epoch {ep}).")
+                # restore best weights
+                if best_state is not None:
+                    self.model.load_state_dict(best_state)
+                break
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.detach().cpu().clone() for k,v in self.model.state_dict().items()}
+                best_epoch = ep
+
 
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_loss)
@@ -1521,6 +1538,9 @@ class MLP(GeneratorFailureProbabilityInference):
         # --- restore best weights ---
         if early_stopping and stopper.best_state is not None:
             self.model.load_state_dict(stopper.best_state)
+        if best_state is not None:
+            # print(f"Restoring best model from epoch {best_epoch} with val loss {best_val_loss:.6f}")
+            self.model.load_state_dict(best_state)
 
     def reset_model(self) -> None:
         """
