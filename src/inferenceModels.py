@@ -1308,6 +1308,18 @@ class MLP(GeneratorFailureProbabilityInference):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optim, T_max=max(1, epochs)
             )
+        elif lr_scheduler == 'linear':
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optim,
+                start_factor=scheduler_kwargs.get("start_factor", 1.0),
+                end_factor=scheduler_kwargs.get("end_factor", 0.0),
+                total_iters=max(1, epochs)
+            )
+        elif lr_scheduler == "exponential":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optim,
+                gamma=scheduler_kwargs.get("gamma", 0.9)
+            )
         elif lr_scheduler == "onecycle":
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optim,
