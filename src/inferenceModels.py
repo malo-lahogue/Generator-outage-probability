@@ -1350,11 +1350,11 @@ class MLP(GeneratorFailureProbabilityInference):
             if focal_loss_alpha_schedule == 'constant' or focal_loss_alpha_schedule is None:
                 alphas_focal_ = torch.tensor(np.array([np.ones(epochs)*a for a in focal_loss_alpha]).T, device=device)
             elif focal_loss_alpha_schedule == 'linear':
-                alphas_focal_ = torch.tensor(np.array([np.linspace(a, 0.0, epochs) for a in focal_loss_alpha]).T, device=device)
+                alphas_focal_ = torch.tensor(np.array([np.linspace(a, 1.0, epochs) for a in focal_loss_alpha]).T, device=device)
             elif focal_loss_alpha_schedule == 'exponential':
-                alphas_focal_ = torch.tensor(np.array([np.logspace(np.log10(a), np.log10(1e-2), epochs) for a in focal_loss_alpha]).T, device=device)
+                alphas_focal_ = torch.tensor(np.array([np.logspace(np.log10(a), np.log10(1), epochs) for a in focal_loss_alpha]).T, device=device)
             elif focal_loss_alpha_schedule == 'cosine':
-                alphas_focal_ = torch.tensor(np.array([(a / 2) * (1 + np.cos(np.linspace(0, np.pi, epochs))) for a in focal_loss_alpha]).T, device=device)
+                alphas_focal_ = torch.tensor(np.array([((a-1) / 2) * (1 + np.cos(np.linspace(0, np.pi, epochs)))+1 for a in focal_loss_alpha]).T, device=device)
             else:
                 raise ValueError(f"Unknown focal_loss_alpha_schedule '{focal_loss_alpha_schedule}'.")
             
