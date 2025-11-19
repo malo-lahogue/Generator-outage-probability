@@ -367,10 +367,10 @@ def _successive_halving_single(
                     "model_name": mname,
                     "build_params": build_str,
                     "train_params": train_str,
-                    "min_val_loss": score,
-                    "timestamp": datetime.datetime.now().astimezone().isoformat(),
                     "state": state_name,
                     "reweight_train_data_density": reweight_train_data_density,
+                    "min_val_loss": score,
+                    "timestamp": datetime.datetime.now().astimezone().isoformat(),
                 }
                 write_header = not os.path.exists(result_csv)
                 with open(result_csv, "a", newline="") as f:

@@ -49,23 +49,45 @@ import xgboost as xgb
 # np.random.seed(0)
 torch.manual_seed(0)
 
+def true_prob_focal_loss(logits:torch.tensor, gamma:float):
+    """
+    Correct the biased probability estimates from focal loss.
+    """
+    with torch.no_grad():
+        p = F.softmax(logits, dim=1)
+        denom = (1 - p) ** gamma - gamma * (1 - p) ** (gamma - 1) * p * torch.log(p + 1e-12)
+        p_t = p / denom
+        p_t = p_t / p_t.sum(dim=1, keepdim=True)
+    return p_t
+
+
 
 def focal_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
+    logits: torch.Tensor | None = None,
+    probs: torch.Tensor | None = None,
+    targets: torch.Tensor | None = None,
     alpha: float = 0.25,
     gamma: float = 2.0,
-    reduction: str = "none"
+    reduction: str = "none",
 ):
     """
-    Multi-class softmax focal loss.
+    Multi-class softmax focal loss. Input either logits or softmax probabilities.
     - logits: (N, C)
+    - probs: (N, C) softmax probabilities
     - targets: (N,) integer labels in {0,1,2}
     - alpha: weight for class imbalance
     - gamma: focusing parameter
     """
     # Compute softmax probabilities
-    probs = F.softmax(logits, dim=1)            # (N, C)
+    if targets is None:
+        raise ValueError("Targets must be provided for focal loss computation.")
+    if logits is None and probs is None:
+        raise ValueError("Either logits or probs must be provided.")
+    if logits is not None and probs is not None:
+        raise ValueError("Provide only one of logits or probs, not both.")
+
+    if probs is None:
+        probs = F.softmax(logits, dim=1)            # (N, C)
     pt = probs[torch.arange(len(targets)), targets]  # (N,)
 
     a = alpha[torch.arange(len(targets)), targets]  # (N,)
@@ -1361,11 +1383,13 @@ class MLP(GeneratorFailureProbabilityInference):
                             # get per-epoch alpha/gamma
                             a = alphas_focal_[:, epoch-1].repeat(yb.size(0), 1)  # shape [B, num_classes]
                             g = gammas_focal_[:, epoch-1].repeat(yb.size(0))  # shape [B]
+                            elem = loss_fn(logits=yhat, targets=yb, alpha=a, gamma=g, reduction='none')
                         else:
                             # evaluation: use cross-entropy
                             a = torch.ones((yb.size(0), self.num_classes), device=device)
                             g = torch.zeros((yb.size(0),), device=device)
-                        elem = loss_fn(yhat, yb, alpha=a, gamma=g, reduction='none')
+                            yhat = true_prob_focal_loss(yhat, gamma=gammas_focal_[0, epoch-1])
+                            elem = loss_fn(probs=yhat, targets=yb, alpha=a, gamma=g, reduction='none')
                     else:
                         elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
                     loss_val = _reduce_elemwise_loss(elem, wb)
