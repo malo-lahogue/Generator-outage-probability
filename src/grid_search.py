@@ -345,17 +345,20 @@ def _successive_halving_single(
 
             # ---------- Score ----------
             # Determine metric: default 'cross_entropy'
-            metric_name = "cross_entropy"
-            if val_metric_per_model:
-                metric_name = (
-                    val_metric_per_model.get(mname)
-                    or val_metric_per_model.get(mname.lower())
-                    or val_metric_per_model.get(model_obj.__class__.__name__)
-                    or val_metric_per_model.get(model_obj.__class__.__name__.lower())
-                    or metric_name
-                )
+            if hasattr(model_obj, "val_loss"):
+                score = float(np.min(model_obj.val_loss))
+            else:
+                metric_name = "cross_entropy"
+                if val_metric_per_model:
+                    metric_name = (
+                        val_metric_per_model.get(mname)
+                        or val_metric_per_model.get(mname.lower())
+                        or val_metric_per_model.get(model_obj.__class__.__name__)
+                        or val_metric_per_model.get(model_obj.__class__.__name__.lower())
+                        or metric_name
+                    )
 
-            score = _val_loss_numpy(model_obj, metric=metric_name)
+                score = _val_loss_numpy(model_obj, metric=metric_name)
 
             scored.append((mi, build_params, train_params, score, mname))
 
