@@ -1397,6 +1397,13 @@ class MLP(GeneratorFailureProbabilityInference):
                         xb, yb = batch
                         wb = None
 
+                    if (yb < 0).any() or (yb >= self.num_classes).any():
+                        print("INVALID LABEL DETECTED!")
+                        print("Batch labels:", yb.unique())
+                        print("Allowed range: [0, ", self.num_classes-1, "]")
+                        raise RuntimeError("Invalid label detected")
+                    print("Target shape", yb.shape)
+
                     xb = xb.to(device)
                     yb = yb.to(device)
 
