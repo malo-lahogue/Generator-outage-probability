@@ -88,6 +88,7 @@ def focal_loss(
 
     if probs is None:
         probs = F.softmax(logits, dim=1)            # (N, C)
+
     pt = probs[torch.arange(len(targets)), targets]  # (N,)
 
     a = alpha[torch.arange(len(targets)), targets]  # (N,)
@@ -1347,7 +1348,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 raise ValueError(f"Unknown focal_loss_gamma_schedule '{focal_loss_gamma_schedule}'.")
             
             if focal_loss_alpha_schedule == 'constant' or focal_loss_alpha_schedule is None:
-                alphas_focal_ = torch.tensor(focal_loss_alpha, device=device).repeat(epochs, 1)
+                alphas_focal_ = torch.tensor(np.array([np.ones(epochs)*a for a in focal_loss_alpha]).T, device=device)
             elif focal_loss_alpha_schedule == 'linear':
                 alphas_focal_ = torch.tensor(np.array([np.linspace(a, 0.0, epochs) for a in focal_loss_alpha]).T, device=device)
             elif focal_loss_alpha_schedule == 'exponential':
@@ -1356,7 +1357,6 @@ class MLP(GeneratorFailureProbabilityInference):
                 alphas_focal_ = torch.tensor(np.array([(a / 2) * (1 + np.cos(np.linspace(0, np.pi, epochs))) for a in focal_loss_alpha]).T, device=device)
             else:
                 raise ValueError(f"Unknown focal_loss_alpha_schedule '{focal_loss_alpha_schedule}'.")
-            print(gammas_focal_.shape, alphas_focal_.shape)
             
 
         # --- weighted reduction helper ---
@@ -1396,13 +1396,6 @@ class MLP(GeneratorFailureProbabilityInference):
                     else:
                         xb, yb = batch
                         wb = None
-
-                    if (yb < 0).any() or (yb >= self.num_classes).any():
-                        print("INVALID LABEL DETECTED!")
-                        print("Batch labels:", yb.unique())
-                        print("Allowed range: [0, ", self.num_classes-1, "]")
-                        raise RuntimeError("Invalid label detected")
-                    print("Target shape", yb.shape)
 
                     xb = xb.to(device)
                     yb = yb.to(device)
