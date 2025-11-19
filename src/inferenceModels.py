@@ -1355,6 +1355,7 @@ class MLP(GeneratorFailureProbabilityInference):
             )
 
         # ---- focal loss schedule ----
+        self.focal_loss_kwargs = {"gamma":focal_loss_gamma, "alpha":focal_loss_alpha, "gamma_schedule":focal_loss_gamma_schedule, "alpha_schedule":focal_loss_alpha_schedule}
         if loss.lower() == 'focal_loss' and self.problem_type == 'classification':
             if focal_loss_gamma is None:
                 raise ValueError("focal_loss_gamma must be provided for focal_loss.")
@@ -1671,6 +1672,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 "loss_fn_name": getattr(self, "loss_fn_name", None),
                 "val_loss": list(getattr(self, "val_loss", [])),
                 "num_parameters": getattr(self, "num_parameters", None),
+                "focal_loss_kwargs": getattr(self, "focal_loss_kwargs", None),
             },
         }
         torch.save(checkpoint, model_path)
