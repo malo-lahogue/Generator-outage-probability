@@ -1210,7 +1210,7 @@ class MLP(GeneratorFailureProbabilityInference):
         loss: Literal["mse", "mae", "logloss", "cross_entropy", "focal_loss"] = "cross_entropy",
         focal_loss_gamma: float | None = None,
         focal_loss_gamma_schedule: Optional[str] = None,
-        focal_loss_alpha: float | None = None,
+        focal_loss_alpha: np.ndarray | None = None,
         focal_loss_alpha_schedule: Optional[str] = None,
         regularization_type: Optional[str] = "L2",
         lambda_reg: float | list[float] = 1e-3,
@@ -1338,9 +1338,30 @@ class MLP(GeneratorFailureProbabilityInference):
                 raise NotImplementedError("focal_loss_gamma_schedule not implemented yet.")
             if focal_loss_alpha_schedule is not None:
                 raise NotImplementedError("focal_loss_alpha_schedule not implemented yet.")
-            alphas_focal_ = torch.ones((self.num_classes, epochs), device=device) * focal_loss_alpha
-            gammas_focal_ = torch.ones((1, epochs), device=device) * focal_loss_gamma
-
+            
+            if focal_loss_gamma_schedule == 'constant' or focal_loss_gamma_schedule is None:
+                gammas_focal_ = torch.ones(epochs, device=device).unsqueeze(1) * focal_loss_gamma
+            elif focal_loss_gamma_schedule == 'linear':
+                gammas_focal_ = torch.linspace(focal_loss_gamma, 0.0, epochs, device=device).unsqueeze(1)
+            elif focal_loss_gamma_schedule == 'exponential':
+                gammas_focal_ = torch.logspace(np.log10(focal_loss_gamma), np.log10(1e-2), epochs, device=device).unsqueeze(1)
+            elif focal_loss_gamma_schedule == 'cosine':
+                gammas_focal_ = (focal_loss_gamma / 2) * (1 + torch.cos(torch.linspace(0, np.pi, epochs, device=device))).unsqueeze(1)
+            else:
+                raise ValueError(f"Unknown focal_loss_gamma_schedule '{focal_loss_gamma_schedule}'.")
+            
+            if focal_loss_alpha_schedule == 'constant' or focal_loss_alpha_schedule is None:
+                alphas_focal_ = torch.tensor(focal_loss_alpha, device=device).repeat(epochs, 1)
+            elif focal_loss_alpha_schedule == 'linear':
+                alphas_focal_ = torch.tensor(np.array([np.linspace(a, 0.0, epochs) for a in focal_loss_alpha]).T, device=device)
+            elif focal_loss_alpha_schedule == 'exponential':
+                alphas_focal_ = torch.tensor(np.array([np.logspace(np.log10(a), np.log10(1e-2), epochs) for a in focal_loss_alpha]).T, device=device)
+            elif focal_loss_alpha_schedule == 'cosine':
+                alphas_focal_ = torch.tensor(np.array([(a / 2) * (1 + np.cos(np.linspace(0, np.pi, epochs))) for a in focal_loss_alpha]).T, device=device)
+            else:
+                raise ValueError(f"Unknown focal_loss_alpha_schedule '{focal_loss_alpha_schedule}'.")
+            
+            
 
         # --- weighted reduction helper ---
         def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
