@@ -1605,9 +1605,12 @@ class MLP(GeneratorFailureProbabilityInference):
             .numpy()
         )
 
-        if self.problem_type == "classification":
+        if self.loss_fn_name in ["cross_entropy", "focal_loss"]:
             # probabilities over classes
-            y_pred = torch.softmax(torch.tensor(logits_or_out), dim=1).numpy()
+            if self.loss_fn_name == "focal_loss":
+                y_pred = true_prob_focal_loss(torch.tensor(logits_or_out), gamma=self.focal_loss_kwargs['gamma']).numpy()
+            else:
+                y_pred = torch.softmax(torch.tensor(logits_or_out), dim=1).numpy()
             return y_pred
 
         # regression: optionally inverse-transform targets
@@ -1735,6 +1738,12 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.loss_fn_name = train_section.get("loss_fn_name", None)
         obj.val_loss = train_section.get("val_loss", [])
         obj.num_parameters = train_section.get("num_parameters", None)
+        obj.focal_loss_kwargs = train_section.get("focal_loss_kwargs", None)
+        if obj.focal_loss_kwargs is not None:
+            obj.focal_loss_gamma = obj.focal_loss_kwargs.get("gamma", None)
+            obj.focal_loss_alpha = obj.focal_loss_kwargs.get("alpha", None)
+            obj.focal_loss_gamma_schedule = obj.focal_loss_kwargs.get("gamma_schedule", None)
+            obj.focal_loss_alpha_schedule = obj.focal_loss_kwargs.get("alpha_schedule", None)
 
         obj.model.eval()
         if verbose:
