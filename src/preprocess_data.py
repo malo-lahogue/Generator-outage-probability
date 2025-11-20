@@ -16,6 +16,7 @@ def preprocess_data(
     power_load_data_path: str,
     feature_names: List[str],
     initial_MC_state_filter: str = 'all',
+    final_MC_state_target: str = 'all',
     technology_filter: List[str] = None,
     state_one_hot: bool = True,
     technology_one_hot: bool = True,
@@ -136,6 +137,14 @@ def preprocess_data(
             ].copy()
         else:
             feature_names.append("Initial_gen_state")
+    # Final Markov state target
+    if "Final_gen_state" in failure_df.columns:
+        if final_MC_state_target != "all":
+            str_states = failure_df["Final_gen_state"].unique()
+            failure_df["Final_gen_state"] = np.where(failure_df["Final_gen_state"] == final_MC_state_target, 1, 0)
+            target_encoding = {s: (1 if s == final_MC_state_target else 0) for s in str_states}
+            integer_encoding["Final_gen_state"] = target_encoding
+    
 
 
     # Restrict to a single state if requested
@@ -243,6 +252,7 @@ def preprocess_data(
         merged_data = merged_data.dropna(axis=0, how="any").copy()
 
     merged_data.reset_index(drop=True, inplace=True)
+
 
 
     # ----------------- 5) Keep only relevant columns & aggregate -----------------
