@@ -181,6 +181,7 @@ class GeneratorFailureProbabilityInference:
         val_ratio: float = 0.2,
         standardize: Union[bool, list[str]] = False,
         reweight_train_data_density: bool | str = False,
+        reweight_power: float = 1.0,
         seed: int = 42,
     ) -> None:
         """
@@ -241,6 +242,8 @@ class GeneratorFailureProbabilityInference:
         self.train_ratio = float(train_ratio)
         self.val_ratio = float(val_ratio)
         self.standardize = standardize
+        self.reweight_train_data_density = reweight_train_data_density
+        self.reweight_power = reweight_power
 
         N = len(ds)
 
@@ -295,7 +298,7 @@ class GeneratorFailureProbabilityInference:
             if "Data_weight" not in ds.columns:
                 ds["Data_weight"] = 1.0
             ds.loc[train_idx, "Data_weight"] = (
-                ds.loc[train_idx, "Data_weight"].to_numpy() * interp_weights
+                ds.loc[train_idx, "Data_weight"].to_numpy() * np.power(interp_weights, self.reweight_power)
             ).astype(np.float32)
 
         # --- standardization setup ---
@@ -1661,6 +1664,8 @@ class MLP(GeneratorFailureProbabilityInference):
                 "feature_cols": getattr(self, "feature_cols", None),
                 "target_cols": getattr(self, "target_cols", None),
                 "standardize": getattr(self, "standardize", False),
+                "reweight_train_data_density": getattr(self, "reweight_train_data_density", False),
+                "reweight_power": getattr(self, "reweight_power", None),
                 "scaler_feature": _pickle_or_none(
                     getattr(self, "scaler_feature", None)
                 ),
@@ -1709,6 +1714,8 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.standardize = data_section.get("standardize", False)
         obj.problem_type = data_section.get("problem_type", "classification")
         obj.num_classes = data_section.get("num_classes", 1)
+        obj.reweight_train_data_density = data_section.get("reweight_train_data_density", False)
+        obj.reweight_power = data_section.get("reweight_power", None)
 
         if not build_spec or "builder" not in build_spec or "kwargs" not in build_spec:
             raise RuntimeError("Invalid or missing build_spec in checkpoint.")
@@ -2361,6 +2368,8 @@ class xgboostModel(GeneratorFailureProbabilityInference):
                 "feature_cols": getattr(self, "feature_cols", None),
                 "target_cols": getattr(self, "target_cols", None),
                 "standardize": getattr(self, "standardize", False),
+                "reweight_train_data_density": getattr(self, "reweight_train_data_density", False),
+                "reweight_power": getattr(self, "reweight_power", None),
                 "scaler_feature": _pickle_or_none(
                     getattr(self, "scaler_feature", None)
                 ),
@@ -2405,6 +2414,9 @@ class xgboostModel(GeneratorFailureProbabilityInference):
         obj.feature_cols = data_section.get("feature_cols", None)
         obj.target_cols = data_section.get("target_cols", None)
         obj.standardize = data_section.get("standardize", False)
+        obj.problem_type = data_section.get("problem_type", "classification")
+        obj.reweight_train_data_density = data_section.get("reweight_train_data_density", False)
+        obj.reweight_power = data_section.get("reweight_power", None)
         obj.num_classes = train_section.get(
             "num_classes", getattr(obj, "num_classes", None)
         )
