@@ -170,6 +170,14 @@ def main() -> None:
                         "early_stopping_rounds" : 10,
                         "device"          : args.device,     
                         }
+    xgb_common_prepare_data = {"train_ratio": 0.80, 
+                            "val_ratio": 0.2,
+                            "standardize":stand_cols, 
+                            "reweight_train_data_density":'Temperature'}
+    xgb_common_train = {
+                        "weights_data": True,
+                     }
+    
     xgb_build_grid = {
                         "max_depth":   [6, 8, 10], #[4, 6, 8, 10]
                         "eta":         [0.04, 0.06, 0.08], # [0.04, 0.05, 0.06, 0.07, 0.08, 0.1]
@@ -178,10 +186,10 @@ def main() -> None:
                         "subsample"       : [0.7, 0.8, 0.9],
                         "num_boost_round" : [100, 200] #[100, 200, 500, 800]
                         }
+    xgb_prepare_data_grid = {
+                                "reweight_power": [0.0, 0.5, 1.0, 1.5, 2.0]
+                            }
 
-    xgb_common_train = {
-                        "weights_data": True,
-                     }
 
     # 2) ######### MLP #########
     mlp_common_build = {
@@ -189,6 +197,23 @@ def main() -> None:
         "target_cols":  target_columns,
         "num_classes": 3 if args.final_state == "all" else 2,
     }
+
+    mlp_common_prepare_data = {"train_ratio": 0.80, 
+                               "val_ratio": 0.2,
+                               "standardize":stand_cols, 
+                               "reweight_train_data_density":'Temperature'}
+    
+    mlp_common_train =  {
+                        "optimizer": "adam",
+                        "loss": "focal_loss",
+                        "regularization_type": "L2",
+                        "weights_data": True,
+                        "device": args.device,
+                        "early_stopping": False,
+                        "grad_clip_norm": 1.0,
+                        }
+    
+
     mlp_build_grid = {
         "hidden_sizes": [
                         # (256, 512, 256, 128, 64), # 5 layers
@@ -203,15 +228,10 @@ def main() -> None:
                         # ("relu",) * 12,
                         ],
     }
-    mlp_common_train =  {
-                        "optimizer": "adam",
-                        "loss": "focal_loss",
-                        "regularization_type": "L2",
-                        "weights_data": True,
-                        "device": args.device,
-                        "early_stopping": False,
-                        "grad_clip_norm": 1.0,
-                        }
+    
+    mlp_prepare_data_grid = {
+                                "reweight_power": [0.0, 0.5, 1.0, 1.5, 2.0]
+                            }
     
     mlp_train_grid = {
                     "epochs"              : [100],   # upper bound — levels will cap
@@ -235,7 +255,6 @@ def main() -> None:
     #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
     #                   • Flat-window: range in last `flat_patience` epochs <= flat_delta (abs or relative).
 
-    #1584 per job
 
     # Choose models from CLI
     include_xgb = "xgb" in args.models or "both" in args.models
@@ -248,6 +267,8 @@ def main() -> None:
             "constructor":  lambda: im.xgboostModel(verbose=False),
             "common_build": xgb_common_build,
             "build_grid":   xgb_build_grid,
+            "common_prepare_data": xgb_common_prepare_data,
+            "prepare_data_grid":   xgb_prepare_data_grid,
             "common_train": xgb_common_train,
             "train_grid":   {},
         })
@@ -257,6 +278,8 @@ def main() -> None:
             "constructor":  lambda: im.MLP(verbose=False),
             "common_build": mlp_common_build,
             "build_grid":   mlp_build_grid,
+            "common_prepare_data": mlp_common_prepare_data,
+            "prepare_data_grid":   mlp_prepare_data_grid,
             "common_train": mlp_common_train,
             "train_grid":   mlp_train_grid,
         })
@@ -285,15 +308,15 @@ def main() -> None:
     winners = gs.successive_halving_search(
         model_specs=model_specs,
         data=train_val_df,
-        standardize=stand_cols,
+        # standardize=stand_cols,
         result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.states}_{args.technologies}_{args.initial_state}_{args.final_state}"+".csv",
-        train_ratio=1.0 - args.val_frac,
-        val_ratio=args.val_frac,
+        # train_ratio=1.0 - args.val_frac,
+        # val_ratio=args.val_frac,
         val_metric_per_model=val_metric,
         levels=training_levels,
         top_keep_ratio=args.top_keep,
         resume=args.reuse_results,
-        reweight_train_data_density='Temperature',
+        # reweight_train_data_density='Temperature',
         seed=args.seed,
         # seed=args.seed,  # if supported by your helper
     )

@@ -51,6 +51,7 @@ def _row_key(
     level_name: str,
     model_name: str,
     build_params: Dict[str, Any],
+    data_params: Dict[str, Any],
     train_params: Dict[str, Any],
     state: Optional[str] = None,
 ) -> Tuple[str, str, str, str, Optional[str]]:
@@ -58,28 +59,30 @@ def _row_key(
     Deterministic key (including state) for resume logic.
     """
     build_str = json.dumps(build_params, sort_keys=True).replace(",", ";")
+    data_str = json.dumps(data_params, sort_keys=True).replace(",", ";")
     train_str = json.dumps(train_params, sort_keys=True).replace(",", ";")
-    return (str(level_name), str(model_name), build_str, train_str, state)
+    return (str(level_name), str(model_name), build_str, data_str, train_str, state)
 
 
 def _already_done_df(csv_path: str) -> pd.DataFrame:
     """
     Load previous results if any. Ensures required columns exist.
     """
-    base_cols = ["level", "model_name", "build_params", "train_params", "min_val_loss", "timestamp"]
-    state_col = "state"
+    # base_cols = ["level", "model_name", "build_params", "data_params", "train_params", "min_val_loss", "timestamp"]
+    # state_col = "state"
 
     if os.path.exists(csv_path):
         try:
             df = pd.read_csv(csv_path)
-            for c in base_cols + [state_col]:
-                if c not in df.columns:
-                    df[c] = None
-            return df[base_cols + [state_col]]
+            return df
+            # for c in base_cols + [state_col]:
+            #     if c not in df.columns:
+            #         df[c] = None
+            # return df[base_cols + [state_col]]
         except Exception:
             pass
-
-    return pd.DataFrame(columns=base_cols + [state_col])
+    return pd.DataFrame()
+    # return pd.DataFrame(columns=base_cols + [state_col])
 
 
 def _val_loss_numpy(
@@ -227,10 +230,10 @@ def _val_loss_numpy(
 def _successive_halving_single(
     model_specs: List[Dict[str, Any]],
     data: pd.DataFrame,
-    standardize: List[str] | bool,
+    # standardize: List[str] | bool,
     result_csv: str,
-    train_ratio: float,
-    val_ratio: float,
+    # train_ratio: float,
+    # val_ratio: float,
     val_metric_per_model: Optional[Dict[str, str]],
     levels: List[Dict[str, Any]],
     top_keep_ratio: float,
@@ -238,7 +241,7 @@ def _successive_halving_single(
     subset_strategy: str,
     subset_seed: int,
     verbose: bool,
-    reweight_train_data_density: bool,
+    # reweight_train_data_density: bool,
     seed: int,
     state_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -251,29 +254,34 @@ def _successive_halving_single(
     all_candidates: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
     for i, spec in enumerate(model_specs):
         build_grid = spec.get("build_grid", {}) or {}
+        data_grid = spec.get("prepare_data_grid", {}) or {}
         train_grid = spec.get("train_grid", {}) or {}
 
         build_list = list(_expand_grid(build_grid))
+        data_list = list(_expand_grid(data_grid))
         train_list = list(_expand_grid(train_grid))
 
         for b in build_list:
-            for t in train_list:
-                all_candidates.append((i, b, t))
+            for d in data_list:
+                for t in train_list:
+                    all_candidates.append((i, b, d, t))
 
     print(f"[grid] total candidates: {len(all_candidates)}")
 
     # --- Resume logic: build key -> score map ---
     done_df = _already_done_df(result_csv)
-    done_index: Dict[Tuple[str, str, str, str, Optional[str]], float] = {}
+    # done_index: Dict[Tuple[str, str, str, str, Optional[str]], float] = {}
+    done_index: Dict[Tuple, float] = {}
 
     if resume and len(done_df):
         for _, r in done_df.iterrows():
             key = (
-                str(r["level"]),
-                str(r["model_name"]),
-                str(r["build_params"]),
-                str(r["train_params"]),
-                r.get("state", None),
+                str(r.get("level", None)),
+                str(r.get("model_name", None)),
+                str(r.get("build_params", None)),
+                str(r.get("data_params", None)),
+                str(r.get("train_params", None)),
+                str(r.get("state", None))
             )
             try:
                 done_index[key] = float(r["min_val_loss"])
@@ -297,15 +305,18 @@ def _successive_halving_single(
         else:
             sub_data = data.copy()
 
-        scored: List[Tuple[int, Dict[str, Any], Dict[str, Any], float, str]] = []
+        scored: List[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any], float, str]] = []
 
-        for (mi, build_params, train_params) in survivors:
+        for (mi, build_params, data_params, train_params) in survivors:
             spec = model_specs[mi]
             mname = spec["name"]
 
             # Merge fixed + grid-specific params
             build_kw = dict(spec.get("common_build", {}))
             build_kw.update(build_params)
+
+            data_kw = dict(spec.get("common_prepare_data", {}))
+            data_kw.update(data_params)
 
             train_kw = dict(spec.get("common_train", {}))
             train_kw.update(train_params)
@@ -315,13 +326,14 @@ def _successive_halving_single(
                 train_kw["epochs"] = int(min(int(train_kw["epochs"]), level_epochs))
 
             # Resume key
-            key_tuple = _row_key(level_name, mname, build_kw, train_kw, state_name)
+            key_tuple = _row_key(level_name, mname, build_kw, data_kw, train_kw, state_name)
             build_str = key_tuple[2]
-            train_str = key_tuple[3]
+            data_str = key_tuple[3]
+            train_str = key_tuple[4]
 
             if resume and key_tuple in done_index:
                 score = done_index[key_tuple]
-                scored.append((mi, build_params, train_params, score, mname))
+                scored.append((mi, build_params, data_params, train_params, score, mname))
                 if verbose:
                     print(f"[resume] skip level={level_name} model={mname} state={state_name} -> score={score:.6g}")
                 continue
@@ -329,13 +341,14 @@ def _successive_halving_single(
             # ---------- Build / prepare / train ----------
             model_obj = spec["constructor"]()
             model_obj.build_model(**build_kw)
-            model_obj.prepare_data(
-                data=sub_data,
-                train_ratio=train_ratio,
-                val_ratio=val_ratio,
-                standardize=standardize,
-                reweight_train_data_density=reweight_train_data_density,
-            )
+            model_obj.prepare_data(**data_kw)
+            # model_obj.prepare_data(
+            #     data=sub_data,
+            #     train_ratio=train_ratio,
+            #     val_ratio=val_ratio,
+            #     standardize=standardize,
+            #     reweight_train_data_density=reweight_train_data_density,
+            # )
             # ensure fresh weights if implemented
             if hasattr(model_obj, "reset_model"):
                 model_obj.reset_model()
@@ -360,7 +373,7 @@ def _successive_halving_single(
 
                 score = _val_loss_numpy(model_obj, metric=metric_name)
 
-            scored.append((mi, build_params, train_params, score, mname))
+            scored.append((mi, build_params, data_params, train_params, score, mname))
 
             # ---------- Log row ----------
             if result_csv:
@@ -369,9 +382,10 @@ def _successive_halving_single(
                     "level": level_name,
                     "model_name": mname,
                     "build_params": build_str,
+                    "data_params": data_str,
                     "train_params": train_str,
                     "state": state_name,
-                    "reweight_train_data_density": reweight_train_data_density,
+                    # "reweight_train_data_density": reweight_train_data_density,
                     "min_val_loss": score,
                     "timestamp": datetime.datetime.now().astimezone().isoformat(),
                 }
@@ -385,17 +399,18 @@ def _successive_halving_single(
         # ---------- Select survivors ----------
         scored.sort(key=lambda t: t[3])  # sort by score asc
         keep = max(1, int(math.ceil(len(scored) * top_keep_ratio)))
-        survivors = [(mi, bp, tp) for (mi, bp, tp, _, _) in scored[:keep]]
+        survivors = [(mi, bp, dp, tp) for (mi, bp, dp, tp, _, _) in scored[:keep]]
 
         # Final level: return winners in structured form
         if li == len(levels) - 1:
             winners: List[Dict[str, Any]] = []
-            for (mi, bp, tp, sc, mname) in scored[:keep]:
+            for (mi, bp, dp, tp, sc, mname) in scored[:keep]:
                 winners.append(
                     {
                         "model_index": mi,
                         "model_name": mname,
                         "build_params": bp,
+                        "data_params": dp,
                         "train_params": tp,
                         "score": sc,
                         "level": level_name,
@@ -414,10 +429,10 @@ def _successive_halving_single(
 def successive_halving_search(
     model_specs: List[Dict[str, Any]],
     data: pd.DataFrame,
-    standardize: List[str] | bool,
+    # standardize: List[str] | bool,
     result_csv: str,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.2,
+    # train_ratio: float = 0.8,
+    # val_ratio: float = 0.2,
     val_metric_per_model: Optional[Dict[str, str]] = None,
     levels: Optional[List[Dict[str, Any]]] = None,
     top_keep_ratio: float = 0.33,
@@ -426,7 +441,7 @@ def successive_halving_search(
     subset_seed: int = 42,
     verbose: bool = False,
     model_per_state: bool = False,
-    reweight_train_data_density: bool = False,
+    # reweight_train_data_density: bool = False,
     seed: int = 42,  # currently only used for data splitting (prepare_data)
 ) -> List[Dict[str, Any]]:
     """
@@ -509,7 +524,7 @@ def successive_halving_search(
                 subset_strategy=subset_strategy,
                 subset_seed=subset_seed,
                 verbose=verbose,
-                reweight_train_data_density=reweight_train_data_density,
+                # reweight_train_data_density=reweight_train_data_density,
                 seed=seed,
                 state_name=state,
             )
@@ -532,7 +547,7 @@ def successive_halving_search(
         subset_strategy=subset_strategy,
         subset_seed=subset_seed,
         verbose=verbose,
-        reweight_train_data_density=reweight_train_data_density,
+        # reweight_train_data_density=reweight_train_data_density,
         seed=seed,
         state_name=None,
     )
