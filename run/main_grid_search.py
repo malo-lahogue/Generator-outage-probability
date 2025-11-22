@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     # Problem params
     p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
     p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
+    p.add_argument("--final_state", type=str, default="all", help="Which Final MC state to target.")
     p.add_argument("--states", type=str, default="all", help="States (geographical) to filter on.")
 
 
@@ -125,6 +126,7 @@ def main() -> None:
                                                                                                 state_filter = args.states,
                                                                                                 state_one_hot=True,
                                                                                                 initial_MC_state_filter=args.initial_state,
+                                                                                                final_MC_state_target = args.final_state,
                                                                                                 technology_filter=technologies,
                                                                                                 technology_one_hot=True,
                                                                                                 test_periods=test_periods,
@@ -137,6 +139,7 @@ def main() -> None:
     # subset_length = 100
     # train_val_df = train_val_df.iloc[0:subset_length].copy().reset_index(drop=True)
     print(f"Train/Val Dataset shape: {train_val_df.shape}")
+
 
     
     # Standardize all continuous features (exclude one-hots and raw categorical/cyclic markers)
@@ -157,7 +160,7 @@ def main() -> None:
     # - common_train: parameters used in all training runs
     # - train_grid:   parameters to search at training time
 
-    # 1) XGBoost
+    # 1) ######### XGBoost #########
     xgb_common_build = {
                         "feature_cols" : feature_names,
                         "target_cols"  : target_columns,
@@ -180,54 +183,59 @@ def main() -> None:
                         "weights_data": True,
                      }
 
-    # 2) MLP
+    # 2) ######### MLP #########
     mlp_common_build = {
         "feature_cols": feature_names,
         "target_cols":  target_columns,
-        "num_classes": 3,
+        "num_classes": 3 if args.final_state == "all" else 2,
     }
     mlp_build_grid = {
         "hidden_sizes": [
                         # (256, 512, 256, 128, 64), # 5 layers
                         # (512, 512, 256, 128, 64), # 5 layers
                         # (128, 128, 128, 128, 64), # 5 layers
-                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,) # 12 layers
                         (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, ) # 10 layers
+                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,) # 12 layers
                         ],
         "activations": [
                         # ("relu",) * 5,
-                        # ("relu",) * 12,
                         ("relu",) * 10,
+                        # ("relu",) * 12,
                         ],
     }
     mlp_common_train =  {
                         "optimizer": "adam",
-                        "loss": "cross_entropy",
+                        "loss": "focal_loss",
                         "regularization_type": "L2",
                         "weights_data": True,
                         "device": args.device,
-                        "early_stopping": True,
+                        "early_stopping": False,
                         "grad_clip_norm": 1.0,
-                        "lr_scheduler": "plateau",
                         }
     
     mlp_train_grid = {
-                    "epochs"              : [2000],   # upper bound — levels will cap
+                    "epochs"              : [100],   # upper bound — levels will cap
                     "batch_size"          : [512],
                     "lambda_reg"          : [5e-2, 1e-3, 5e-3], # 1e-3
-                    "lr"                  : [2e-4, 4e-4, 1e-3, 2e-3, 4e-3, 7e-3],
-                    "patience"            : [20],
-                    "min_delta"           : [5e-5],
-                    "flat_delta"          : [1e-4],
-                    "flat_patience"       : [50],
-                    "flat_mode"           : ['iqr'],
-                    "rel_flat"            : [2e-3],
-                    "burn_in"             : [150],
+                    "lr"                  : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3, 2e-3],
+                    "focal_loss_alpha"    : [[1.0, 1.0, 1.0]],#[0.01, 0.985, 0.985],[1.0, 1.0, 1.0]
+                    "focal_loss_alpha_schedule" : ['constant'],  # ['constant', 'linear', 'exponential', 'cosine']
+                    "focal_loss_gamma"    : [0.0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0], # [0.0, 0.5, 1, 1.5, 2.0, 2.5, 3.0]
+                    "focal_loss_gamma_schedule" : ['constant'], # ['constant', 'linear', 'exponential', 'cosine']
+                    "lr_scheduler"          : ['exponential', 'cosine'],  # ['constant', 'linear', 'exponential', 'cosine']
+                    # "patience"            : [20],
+                    # "min_delta"           : [5e-5],
+                    # "flat_delta"          : [1e-4],
+                    # "flat_patience"       : [50],
+                    # "flat_mode"           : ['iqr'],
+                    # "rel_flat"            : [2e-3],
+                    # "burn_in"             : [150],
                     }
     #                 Stop only when BOTH conditions hold:
     #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
     #                   • Flat-window: range in last `flat_patience` epochs <= flat_delta (abs or relative).
 
+    #1584 per job
 
     # Choose models from CLI
     include_xgb = "xgb" in args.models or "both" in args.models
@@ -270,7 +278,7 @@ def main() -> None:
 
     training_levels = [
         # {"name": "L1-fast",   "epochs": 15,  "data_cap": int(n_rows * 0.50)},
-        {"name": "L3-full",   "epochs": 30, "data_cap": None},
+        {"name": "L3-full",   "epochs": 100, "data_cap": None},
     ]
 
     # ---------- Run search ----------
@@ -278,7 +286,7 @@ def main() -> None:
         model_specs=model_specs,
         data=train_val_df,
         standardize=stand_cols,
-        result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.states}_{args.technologies}_{args.initial_state}"+".csv",
+        result_csv=str(args.result_csv)+f"_{''.join(args.models)}_{args.states}_{args.technologies}_{args.initial_state}_{args.final_state}"+".csv",
         train_ratio=1.0 - args.val_frac,
         val_ratio=args.val_frac,
         val_metric_per_model=val_metric,

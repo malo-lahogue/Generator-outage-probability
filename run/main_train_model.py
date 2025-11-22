@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     # Problem params
     p.add_argument("--technologies", type=str, default="thermal", help="Group of technologies to consider.")
     p.add_argument("--initial_state", type=str, default="A", help="Which initial MC state to filter on.")
+    p.add_argument("--final_state", type=str, default="all", help="Which Final MC state to target.")
     p.add_argument("--states", type=str, default="all", help="States (geographical) to filter on.")
 
     
@@ -122,6 +123,7 @@ def main() -> None:
                                                                                                 state_filter = args.states,
                                                                                                 state_one_hot=True,
                                                                                                 initial_MC_state_filter=args.initial_state,
+                                                                                                final_MC_state_target = args.final_state,
                                                                                                 technology_filter=technologies,
                                                                                                 technology_one_hot=True,
                                                                                                 test_periods=test_periods,
@@ -149,9 +151,8 @@ def main() -> None:
     target_columns.sort()
 
     # ---------- Path to save model ----------
-    path_to_save = THIS_DIR / "../Results/Models" / f"model_{args.models.upper()}_Tech_{args.technologies}_State_{args.initial_state}_InitState_{args.states}.pth"
-
-    
+    path_to_save = {model_name:THIS_DIR / "../Results/Models" / f"model_{model_name.upper()}_Tech_{args.technologies}_fr_{args.initial_state}_to_{args.final_state}_State_{args.states}.pth" 
+                            for model_name in args.models}
 
     if "xgb" in args.models:
 
@@ -178,41 +179,45 @@ def main() -> None:
 
         xgb_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, seed=args.seed, standardize=stand_cols, reweight_train_data_density='Temperature')
         xgb_model.train_model(weights_data=True)
-        xgb_model.save_model(path_to_save)
+        xgb_model.save_model(path_to_save['xgb'])
 
 
     elif "mlp" in args.models:
 
-        build_kw = {"activations": ["relu", "relu", "relu", "relu", "relu"], "feature_cols": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "DayOfWeek_cos", "DayOfWeek_sin", "DayOfYear_cos", "DayOfYear_sin", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Heat_index_isnan", "Holiday", "Hourly_load_change", "Load", "Month_cos", "Month_sin", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Season_cos", "Season_sin", "Snow_depth", "State_ALABAMA", "State_ARIZONA", "State_ARKANSAS", "State_CALIFORNIA", "State_COLORADO", "State_CONNECTICUT", "State_DELAWARE", "State_FLORIDA", "State_GEORGIA", "State_IDAHO", "State_ILLINOIS", "State_INDIANA", "State_IOWA", "State_KANSAS", "State_KENTUCKY", "State_LOUISIANA", "State_MAINE", "State_MARYLAND", "State_MASSACHUSETTS", "State_MICHIGAN", "State_MINNESOTA", "State_MISSISSIPPI", "State_MISSOURI", "State_MONTANA", "State_NEBRASKA", "State_NEVADA", "State_NEW HAMPSHIRE", "State_NEW JERSEY", "State_NEW MEXICO", "State_NEW YORK", "State_NORTH CAROLINA", "State_NORTH DAKOTA", "State_OHIO", "State_OKLAHOMA", "State_OREGON", "State_PENNSYLVANIA", "State_SOUTH CAROLINA", "State_SOUTH DAKOTA", "State_TENNESSEE", "State_TEXAS", "State_UTAH", "State_VERMONT", "State_VIRGINIA", "State_WASHINGTON", "State_WEST VIRGINIA", "State_WISCONSIN", "State_WYOMING", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Weekend", "Wet_bulb_temperature", "Wind_chill", "Wind_chill_isnan", "Wind_speed"], "hidden_sizes": [256, 512, 256, 128, 64], "num_classes": 3, "target_cols": ["Final_gen_state"]}
-        train_kw = {"batch_size": 512, "burn_in": 150, "device": "cuda", "early_stopping": True, "epochs": 30, "flat_delta": 0.0001, "flat_mode": "iqr", "flat_patience": 50, "grad_clip_norm": 1.0, "lambda_reg": 0.001, "loss": "cross_entropy", "lr": 0.0004, "lr_scheduler": "plateau", "min_delta": 5e-05, "optimizer": "adam", "patience": 20, "regularization_type": "L2", "rel_flat": 0.002, "weights_data": True}
+        build_kw = {"activations": ["relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu"], "feature_cols": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "DayOfWeek_cos", "DayOfWeek_sin", "DayOfYear_cos", "DayOfYear_sin", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Heat_index_isnan", "Holiday", "Hourly_load_change", "Load", "Month_cos", "Month_sin", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Season_cos", "Season_sin", "Snow_depth", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Weekend", "Wet_bulb_temperature", "Wind_chill", "Wind_chill_isnan", "Wind_speed"], "hidden_sizes": [256, 512, 512, 256, 128, 64, 64, 64, 64, 64], "num_classes": 3, "target_cols": ["Final_gen_state"]}
+        train_kw = {"batch_size": 512, "device": "cuda", "early_stopping": False, "epochs": 100, "focal_loss_alpha": [1.0, 1.0, 1.0], "focal_loss_alpha_schedule": "constant", "focal_loss_gamma": 3.0, "focal_loss_gamma_schedule": "constant", "grad_clip_norm": 1.0, "lambda_reg": 0.05, "loss": "focal_loss", "lr": 0.0001, "lr_scheduler": "constant", "optimizer": "adam", "regularization_type": "L2", "weights_data": True}
 
 
         mlp_model = im.MLP(verbose=False)
         # mlp_model.build_model(feature_cols=feature_names,
         #                     target_cols=target_columns,
-        #                     num_classes=3,
+        #                     num_classes=3 if args.final_state == "all" else 2,
         #                     hidden_sizes=(128, 128, 64, 32, 32, 32, 32, 32),
         #                     activations=("relu",) * 8)
         mlp_model.build_model(**build_kw)
 
-        mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature')
+        mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature', seed=args.seed)
 
         mlp_model.train_model(**train_kw)
         # mlp_model.train_model(optimizer='adam', 
-        #                       loss='cross_entropy',
+        #                       loss='focal_loss',
+        #                       focal_loss_alpha=[1.0, 1.0], focal_loss_gamma=2,
+        #                       focal_loss_alpha_schedule='constant', focal_loss_gamma_schedule='constant',
         #                         regularization_type='L2', lambda_reg=1e-3,
         #                         weights_data=True,
-        #                         epochs=100, batch_size=512, lr=2e-3,
+        #                         epochs=100, batch_size=512, lr=1e-4,
         #                         device=args.device,
+
         #                         # smart stopping knobs
-        #                         early_stopping=True, patience=20, min_delta=5e-5,
-        #                         flat_delta=1e-4, flat_patience=50, flat_mode='iqr', rel_flat=2e-3, burn_in=150,
+        #                         early_stopping=False, 
+        #                         # patience=20, min_delta=5e-5,
+        #                         # flat_delta=1e-4, flat_patience=50, flat_mode='iqr', rel_flat=2e-3, burn_in=150,
         #                         # stability & LR policy
         #                         grad_clip_norm=1.0,
-        #                         lr_scheduler='plateau', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
+        #                         lr_scheduler='constant', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
 
 
-        mlp_model.save_model(path_to_save)
+        mlp_model.save_model(path_to_save['mlp'])
         print(mlp_model.val_loss)
 
     t_end = time()
