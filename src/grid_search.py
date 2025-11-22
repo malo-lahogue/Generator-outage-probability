@@ -339,7 +339,7 @@ def _successive_halving_single(
                 score = done_index[key_tuple]
                 scored.append((mi, build_params, data_params, train_params, score, mname))
                 if verbose:
-                # print(f"[resume] skip level={level_name} model={mname} state={state_name} -> score={score:.6g}")
+                    print(f"[resume] skip level={level_name} model={mname} state={state_name} -> score={score:.6g}")
                 continue
             
 
@@ -391,6 +391,7 @@ def _successive_halving_single(
                     "train_params": train_str,
                     "state": state_name,
                     # "reweight_train_data_density": reweight_train_data_density,
+                    "val_loss_per_logit": getattr(model_obj, "val_loss_per_logit", {}),
                     "min_val_loss": score,
                     "timestamp": datetime.datetime.now().astimezone().isoformat(),
                 }
