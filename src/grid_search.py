@@ -275,13 +275,16 @@ def _successive_halving_single(
 
     if resume and len(done_df):
         for _, r in done_df.iterrows():
+            state = str(r.get("state", None))
+            if state == 'nan':
+                state = None
             key = (
                 str(r.get("level", None)),
                 str(r.get("model_name", None)),
                 str(r.get("build_params", None)),
                 str(r.get("data_params", None)),
                 str(r.get("train_params", None)),
-                str(r.get("state", None))
+                state
             )
             try:
                 done_index[key] = float(r["min_val_loss"])
@@ -331,17 +334,19 @@ def _successive_halving_single(
             data_str = key_tuple[3]
             train_str = key_tuple[4]
 
+
             if resume and key_tuple in done_index:
                 score = done_index[key_tuple]
                 scored.append((mi, build_params, data_params, train_params, score, mname))
                 if verbose:
-                    print(f"[resume] skip level={level_name} model={mname} state={state_name} -> score={score:.6g}")
+                # print(f"[resume] skip level={level_name} model={mname} state={state_name} -> score={score:.6g}")
                 continue
+            
 
             # ---------- Build / prepare / train ----------
             model_obj = spec["constructor"]()
             model_obj.build_model(**build_kw)
-            model_obj.prepare_data(**data_kw)
+            model_obj.prepare_data(data=sub_data, **data_kw)
             # model_obj.prepare_data(
             #     data=sub_data,
             #     train_ratio=train_ratio,
@@ -513,10 +518,10 @@ def successive_halving_search(
             winners_state = _successive_halving_single(
                 model_specs=model_specs,
                 data=data_state,
-                standardize=standardize,
+                # standardize=standardize,
                 result_csv=state_csv,
-                train_ratio=train_ratio,
-                val_ratio=val_ratio,
+                # train_ratio=train_ratio,
+                # val_ratio=val_ratio,
                 val_metric_per_model=val_metric_per_model,
                 levels=levels,
                 top_keep_ratio=top_keep_ratio,
@@ -536,10 +541,10 @@ def successive_halving_search(
     winners = _successive_halving_single(
         model_specs=model_specs,
         data=data,
-        standardize=standardize,
+        # standardize=standardize,
         result_csv=result_csv,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
+        # train_ratio=train_ratio,
+        # val_ratio=val_ratio,
         val_metric_per_model=val_metric_per_model,
         levels=levels,
         top_keep_ratio=top_keep_ratio,
