@@ -34,7 +34,7 @@ def compute_mutual_information_npeet(
     target_col: str,
     discrete_features: Iterable[str] = (),
     k: int = 3,
-    use_rows: pd.Index | None = None,
+    use_rows: pd.Index  = None,
     out_csv: str = "Results/mutual_information_ranking.csv",
     standardize_continuous: bool = False,
     ) -> pd.DataFrame:
@@ -106,7 +106,7 @@ def compute_mutual_information_sklearn(
     target_col: str,
     discrete_features: Iterable[str] = (),
     k: int = 3,
-    use_rows: pd.Index | None = None,
+    use_rows: pd.Index = None,
     out_csv: str = "Results/mutual_information_ranking.csv",
     standardize_continuous: bool = False,
     ) -> pd.DataFrame:
@@ -141,7 +141,7 @@ def compute_mutual_information_auto(
     library = 'npeet', # 'sklearn' or 'npeet'
     discrete_features: Iterable[str] = (),
     k: int = 3,
-    use_rows: pd.Index | None = None,
+    use_rows: pd.Index = None,
     out_csv: str = "Results/mutual_information_ranking.csv",
     standardize_continuous: bool = False,
     ) -> pd.DataFrame:
@@ -157,7 +157,7 @@ def compute_mutual_information_auto(
             standardize_continuous=standardize_continuous,
         )
     elif library == 'sklearn':
-        compute_mutual_information_sklearn(
+        return compute_mutual_information_sklearn(
             df=df,
             feature_names=feature_names,
             target_col=target_col,
