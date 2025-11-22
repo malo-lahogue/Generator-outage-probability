@@ -16,7 +16,7 @@ import json
 import math
 import pickle
 import warnings
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, Iterable, Literal, List,
@@ -1282,6 +1282,7 @@ class MLP(GeneratorFailureProbabilityInference):
         device : str
             'cpu' or 'cuda'.
         """
+        self.val_loss_per_logit = defaultdict(list)
 
         # --- consistency checks between problem_type and loss ---
         if self.problem_type == "classification" and loss not in ["cross_entropy", "focal_loss", "logloss"]:
@@ -1441,6 +1442,8 @@ class MLP(GeneratorFailureProbabilityInference):
         def step(loader, train: bool, epoch: int):
             self.model.train() if train else self.model.eval()
             total, n = 0.0, 0
+            val_loss_per_logit = defaultdict(list)
+            n_per_logit = defaultdict(int)
             with torch.set_grad_enabled(train):
                 for batch in loader:
                     if len(batch) == 3:
@@ -1476,6 +1479,15 @@ class MLP(GeneratorFailureProbabilityInference):
                         elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
                     loss_val = _reduce_elemwise_loss(elem, wb)
 
+                    if not train and self.num_classes > 1:
+                        for c in torch.unique(yb):
+                            mask = (yb == c)
+                            if mask.sum() > 0:
+                                wbc = wb[mask]
+                                loss_c = _reduce_elemwise_loss(elem[mask], wbc)
+                                val_loss_per_logit[int(c)].append(loss_c)
+                                n_per_logit[int(c)] += wbc.sum().item() if wbc is not None else mask.sum().item()
+
                     # regularization
                     if regularization_type == 'L1':
                         l1 = sum(p.abs().sum() for p in self.model.parameters())
@@ -1491,9 +1503,14 @@ class MLP(GeneratorFailureProbabilityInference):
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
                         optim.step()
 
-                    bs = xb.size(0)
+                    # bs = xb.size(0)
+                    bs = wb.sum().item() if wb is not None else xb.size(0)
                     total += loss_val.item() * bs
                     n     += bs
+            if not train and self.num_classes > 1:
+                for c, losses in val_loss_per_logit.items():
+                    total_c = sum(losses).item()
+                    self.val_loss_per_logit[c].append(total_c / max(1e-12, n_per_logit[c]))
             return total / max(1, n)
 
         # --- early stopper ---
@@ -1564,8 +1581,13 @@ class MLP(GeneratorFailureProbabilityInference):
             for layer in self.model.children():
                 if hasattr(layer, 'reset_parameters'):
                     layer.reset_parameters()
+            if hasattr(self, 'val_loss'):
+                self.val_loss = []
+            if hasattr(self, 'val_loss_per_logit'):
+                self.val_loss_per_logit = defaultdict(list)
             if self.verbose:
                 print("Model weights have been reset.")
+
 
     @torch.no_grad()
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -1683,6 +1705,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 "optimizer_name": getattr(self, "optimizer_name", None),
                 "loss_fn_name": getattr(self, "loss_fn_name", None),
                 "val_loss": list(getattr(self, "val_loss", [])),
+                "val_loss_per_logit": getattr(self, "val_loss_per_logit", {}),
                 "num_parameters": getattr(self, "num_parameters", None),
                 "focal_loss_kwargs": getattr(self, "focal_loss_kwargs", None),
             },
@@ -1748,6 +1771,7 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.optimizer_name = train_section.get("optimizer_name", None)
         obj.loss_fn_name = train_section.get("loss_fn_name", None)
         obj.val_loss = train_section.get("val_loss", [])
+        obj.val_loss_per_logit = train_section.get("val_loss_per_logit", {})
         obj.num_parameters = train_section.get("num_parameters", None)
         obj.focal_loss_kwargs = train_section.get("focal_loss_kwargs", None)
         if obj.focal_loss_kwargs is not None:
