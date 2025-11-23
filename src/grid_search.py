@@ -5,6 +5,7 @@ import math
 import itertools
 import datetime
 from typing import Any, Dict, Iterable, List, Tuple, Optional
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -230,18 +231,15 @@ def _val_loss_numpy(
 def _successive_halving_single(
     model_specs: List[Dict[str, Any]],
     data: pd.DataFrame,
-    # standardize: List[str] | bool,
     result_csv: str,
-    # train_ratio: float,
-    # val_ratio: float,
     val_metric_per_model: Optional[Dict[str, str]],
     levels: List[Dict[str, Any]],
     top_keep_ratio: float,
+    num_folds_cv: int,
     resume: bool,
     subset_strategy: str,
     subset_seed: int,
     verbose: bool,
-    # reweight_train_data_density: bool,
     seed: int,
     state_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -302,11 +300,36 @@ def _successive_halving_single(
         # subset data for this level
         if data_cap is not None and data_cap < len(data):
             if subset_strategy == "random":
-                sub_data = data.sample(n=data_cap, random_state=subset_seed).copy()
+                sub_data = data.sample(n=data_cap, random_state=subset_seed).reset_index(drop=True).copy()
             else:
-                sub_data = data.iloc[:data_cap].copy()
+                sub_data = data.iloc[:data_cap].reset_index(drop=True).copy()
         else:
-            sub_data = data.copy()
+            sub_data = data.reset_index(drop=True).copy()
+
+        splits_idxs: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = []
+        if num_folds_cv > 1:
+            N = len(sub_data)
+            indices = np.arange(N)
+            np.random.seed(seed)
+            np.random.shuffle(indices)
+            fold_sizes = (N // num_folds_cv) * np.ones(num_folds_cv, dtype=int)
+            fold_sizes[: N % num_folds_cv] += 1
+            current = 0
+            for fold_size in fold_sizes:
+                start, stop = current, current + fold_size
+                val_idx = indices[start:stop]
+                train_idx = np.concatenate([indices[:start], indices[stop:]])
+                splits_idxs.append((train_idx, val_idx))
+                current = stop
+        else:
+            print("No CV folds, taking 80/20 split")
+            N = len(sub_data)
+            indices = np.arange(N)
+            np.random.seed(seed)
+            np.random.shuffle(indices)
+            split_at = int(N * 0.8)
+            train_idx, val_idx = indices[:split_at], indices[split_at:]
+            splits_idxs.append((train_idx, val_idx))
 
         scored: List[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any], float, str]] = []
 
@@ -329,7 +352,9 @@ def _successive_halving_single(
                 train_kw["epochs"] = int(min(int(train_kw["epochs"]), level_epochs))
 
             # Resume key
-            key_tuple = _row_key(level_name, mname, build_kw, data_kw, train_kw, state_name)
+            data_kw_key = data_kw.copy()
+            data_kw_key.update({"k_folds": num_folds_cv})
+            key_tuple = _row_key(level_name, mname, build_kw, data_kw_key, train_kw, state_name)
             build_str = key_tuple[2]
             data_str = key_tuple[3]
             train_str = key_tuple[4]
@@ -344,42 +369,51 @@ def _successive_halving_single(
             
 
             # ---------- Build / prepare / train ----------
-            model_obj = spec["constructor"]()
-            model_obj.build_model(**build_kw)
-            model_obj.prepare_data(data=sub_data, **data_kw)
-            # model_obj.prepare_data(
-            #     data=sub_data,
-            #     train_ratio=train_ratio,
-            #     val_ratio=val_ratio,
-            #     standardize=standardize,
-            #     reweight_train_data_density=reweight_train_data_density,
-            # )
-            # ensure fresh weights if implemented
-            if hasattr(model_obj, "reset_model"):
-                model_obj.reset_model()
-            model_obj.val_loss = []
+            best_val_losses = []
+            best_epochs = []
+            val_losses_per_logits = defaultdict(list)
+            for fold_i, split in enumerate(splits_idxs):
 
-            model_obj.train_model(**train_kw)
+                model_obj = spec["constructor"]()
+                model_obj.build_model(**build_kw)
+                model_obj.prepare_data(data=sub_data, split_idxs=split, **data_kw)
+                # ensure fresh weights if implemented
+                if hasattr(model_obj, "reset_model"):
+                    model_obj.reset_model()
+                model_obj.val_loss = []
 
-            # ---------- Score ----------
-            # Determine metric: default 'cross_entropy'
-            if hasattr(model_obj, "val_loss"):
-                score = float(np.min(model_obj.val_loss))
-            else:
-                metric_name = "cross_entropy"
-                if val_metric_per_model:
-                    metric_name = (
-                        val_metric_per_model.get(mname)
-                        or val_metric_per_model.get(mname.lower())
-                        or val_metric_per_model.get(model_obj.__class__.__name__)
-                        or val_metric_per_model.get(model_obj.__class__.__name__.lower())
-                        or metric_name
-                    )
+                model_obj.train_model(**train_kw)
 
-                score = _val_loss_numpy(model_obj, metric=metric_name)
+                # ---------- Score ----------
+                # Determine metric: default 'cross_entropy'
+                if hasattr(model_obj, "val_loss"):
+                    score = float(np.min(model_obj.val_loss))
+                else:
+                    metric_name = "cross_entropy"
+                    if val_metric_per_model:
+                        metric_name = (
+                            val_metric_per_model.get(mname)
+                            or val_metric_per_model.get(mname.lower())
+                            or val_metric_per_model.get(model_obj.__class__.__name__)
+                            or val_metric_per_model.get(model_obj.__class__.__name__.lower())
+                            or metric_name
+                        )
 
-            scored.append((mi, build_params, data_params, train_params, score, mname))
+                    score = _val_loss_numpy(model_obj, metric=metric_name)
 
+                best_val_losses.append(score)
+                best_epoch = int(np.argmin(model_obj.val_loss)) + 1 if hasattr(model_obj, "val_loss") else -1
+                best_epochs.append(best_epoch)
+                if hasattr(model_obj, "val_loss_per_logit"):
+                    for logit, vloss in model_obj.val_loss_per_logit.items():
+                        val_losses_per_logits[logit].append(vloss)
+
+            scored.append((mi, build_params, data_params, train_params, np.mean(best_val_losses), mname))
+
+            score_dict = {
+                "val_loss": best_val_losses,
+                "best_epoch": best_epochs,
+            }
             # ---------- Log row ----------
             if result_csv:
                 os.makedirs(os.path.dirname(result_csv), exist_ok=True)
@@ -390,9 +424,8 @@ def _successive_halving_single(
                     "data_params": data_str,
                     "train_params": train_str,
                     "state": state_name,
-                    # "reweight_train_data_density": reweight_train_data_density,
-                    "val_loss_per_logit": getattr(model_obj, "val_loss_per_logit", {}),
-                    "min_val_loss": score,
+                    "val_loss_per_logit": val_losses_per_logits,
+                    "score": score_dict,
                     "timestamp": datetime.datetime.now().astimezone().isoformat(),
                 }
                 write_header = not os.path.exists(result_csv)
@@ -435,19 +468,16 @@ def _successive_halving_single(
 def successive_halving_search(
     model_specs: List[Dict[str, Any]],
     data: pd.DataFrame,
-    # standardize: List[str] | bool,
     result_csv: str,
-    # train_ratio: float = 0.8,
-    # val_ratio: float = 0.2,
     val_metric_per_model: Optional[Dict[str, str]] = None,
     levels: Optional[List[Dict[str, Any]]] = None,
     top_keep_ratio: float = 0.33,
+    num_folds_cv: int =1,
     resume: bool = True,
     subset_strategy: str = "head",   # "head" or "random"
     subset_seed: int = 42,
     verbose: bool = False,
     model_per_state: bool = False,
-    # reweight_train_data_density: bool = False,
     seed: int = 42,  # currently only used for data splitting (prepare_data)
 ) -> List[Dict[str, Any]]:
     """
@@ -519,18 +549,15 @@ def successive_halving_search(
             winners_state = _successive_halving_single(
                 model_specs=model_specs,
                 data=data_state,
-                # standardize=standardize,
                 result_csv=state_csv,
-                # train_ratio=train_ratio,
-                # val_ratio=val_ratio,
                 val_metric_per_model=val_metric_per_model,
                 levels=levels,
                 top_keep_ratio=top_keep_ratio,
+                num_folds_cv=num_folds_cv,
                 resume=resume,
                 subset_strategy=subset_strategy,
                 subset_seed=subset_seed,
                 verbose=verbose,
-                # reweight_train_data_density=reweight_train_data_density,
                 seed=seed,
                 state_name=state,
             )
@@ -542,18 +569,15 @@ def successive_halving_search(
     winners = _successive_halving_single(
         model_specs=model_specs,
         data=data,
-        # standardize=standardize,
         result_csv=result_csv,
-        # train_ratio=train_ratio,
-        # val_ratio=val_ratio,
         val_metric_per_model=val_metric_per_model,
         levels=levels,
         top_keep_ratio=top_keep_ratio,
+        num_folds_cv=num_folds_cv,
         resume=resume,
         subset_strategy=subset_strategy,
         subset_seed=subset_seed,
         verbose=verbose,
-        # reweight_train_data_density=reweight_train_data_density,
         seed=seed,
         state_name=None,
     )

@@ -177,8 +177,8 @@ class GeneratorFailureProbabilityInference:
     def prepare_data(
         self,
         data: pd.DataFrame,
-        train_ratio: float = 0.8,
-        val_ratio: float = 0.2,
+        split_ratios : Tuple[float, float] = (None, None),
+        split_idxs: Tuple[Sequence[int], Sequence[int]] = (None, None),
         standardize: Union[bool, list[str]] = False,
         reweight_train_data_density: bool | str = False,
         reweight_power: float = 1.0,
@@ -230,37 +230,41 @@ class GeneratorFailureProbabilityInference:
                     f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set "
                     "(usually done in build_model)."
                 )
-
-        if any(r < 0 for r in (train_ratio, val_ratio)):
+        if split_ratios == (None, None) and split_idxs == (None, None):
+            raise ValueError("Either split_ratios or split_idxs must be provided.")
+        if any(r < 0 for r in split_ratios):
             raise ValueError("train_ratio and val_ratio must be non-negative.")
-        if train_ratio + val_ratio > 1.0 + 1e-9:
+        if sum(split_ratios) > 1.0 + 1e-9:
             raise ValueError("train_ratio + val_ratio must be ≤ 1.0.")
+        if split_idxs != (None, None):
+            train_idx, val_idx = split_idxs
+            if not isinstance(train_idx, Sequence) or not isinstance(val_idx, Sequence):
+                raise TypeError("split_idxs must be tuples of sequences of integers.")
+            if len(set(train_idx).intersection(set(val_idx))) > 0:
+                raise ValueError("train_idx and val_idx must be disjoint.")
+            if max(train_idx + val_idx) >= len(data):
+                raise IndexError("train_idx or val_idx contains out-of-bounds indices.")
+
 
         # --- clone dataset and store config ---
         ds = data.copy()
         self.dataset_df = ds
-        self.train_ratio = float(train_ratio)
-        self.val_ratio = float(val_ratio)
+        self.split_ratios = split_ratios
+        self.split_idxs = split_idxs
         self.standardize = standardize
         self.reweight_train_data_density = reweight_train_data_density
         self.reweight_power = reweight_power
 
         N = len(ds)
 
-        # --- deterministic split (random permutation, fixed seed) ---
-        if train_ratio + val_ratio == 0:
-            # degenerate case: everything to "train", none to "val"
-            train_size = N
-            val_size = 0
-        else:
-            frac = train_ratio / max(train_ratio + val_ratio, 1e-12)
-            train_size = int(round(N * frac))
-            val_size = N - train_size
-
-        rng = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(N, generator=rng).tolist()
-        train_idx = perm[:train_size]
-        val_idx = perm[train_size:train_size + val_size]
+        if self.split_ratios != (None, None):
+            train_ratio, val_ratio = self.split_ratios
+            train_size = int(N * train_ratio)
+            val_size = int(N * val_ratio)
+            rng = torch.Generator().manual_seed(seed)
+            perm = torch.randperm(N, generator=rng).tolist()
+            train_idx = perm[:train_size]
+            val_idx = perm[train_size:train_size + val_size]
 
         self._train_idx = train_idx
         self._val_idx = val_idx
