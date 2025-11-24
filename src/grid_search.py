@@ -284,11 +284,18 @@ def _successive_halving_single(
                 str(r.get("train_params", None)),
                 state
             )
-            try:
-                done_index[key] = float(r["min_val_loss"])
-            except Exception:
-                continue
-
+            # try:
+            s = r.get('score')
+            s = s.split('[')[1].split(']')[0]
+            if ',' in s:
+                op = ', '
+            else:
+                op = '; '
+            s = s.split(op)
+            s = np.array(s, dtype=float).mean()
+            done_index[key] = s
+            # except Exception:
+            #     continue
     survivors = list(all_candidates)
 
     # --- Iterate over levels ---
@@ -414,6 +421,7 @@ def _successive_halving_single(
                 "val_loss": best_val_losses,
                 "best_epoch": best_epochs,
             }
+            score_dict = json.dumps(score_dict, sort_keys=True).replace(",", ";")
             # ---------- Log row ----------
             if result_csv:
                 os.makedirs(os.path.dirname(result_csv), exist_ok=True)

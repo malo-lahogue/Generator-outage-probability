@@ -230,19 +230,20 @@ class GeneratorFailureProbabilityInference:
                     f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set "
                     "(usually done in build_model)."
                 )
-        if split_ratios == (None, None) and split_idxs == (None, None):
+        if any(v is None for v in split_ratios) and any(v is None for v in split_idxs):
             raise ValueError("Either split_ratios or split_idxs must be provided.")
-        if any(r < 0 for r in split_ratios):
-            raise ValueError("train_ratio and val_ratio must be non-negative.")
-        if sum(split_ratios) > 1.0 + 1e-9:
-            raise ValueError("train_ratio + val_ratio must be ≤ 1.0.")
-        if split_idxs != (None, None):
+        if all(v is not None for v in split_ratios):
+            if any(r < 0 for r in split_ratios):
+                raise ValueError("train_ratio and val_ratio must be non-negative.")
+            if sum(split_ratios) > 1.0 + 1e-9:
+                raise ValueError("train_ratio + val_ratio must be ≤ 1.0.")
+        if all(v is not None for v in split_idxs):
             train_idx, val_idx = split_idxs
-            if not isinstance(train_idx, Sequence) or not isinstance(val_idx, Sequence):
-                raise TypeError("split_idxs must be tuples of sequences of integers.")
+            # if not isinstance(train_idx, Sequence) or not isinstance(val_idx, Sequence):
+            #     raise TypeError("split_idxs must be tuples of sequences of integers.")
             if len(set(train_idx).intersection(set(val_idx))) > 0:
                 raise ValueError("train_idx and val_idx must be disjoint.")
-            if max(train_idx + val_idx) >= len(data):
+            if max(list(train_idx) + list(val_idx)) >= len(data):
                 raise IndexError("train_idx or val_idx contains out-of-bounds indices.")
 
 
