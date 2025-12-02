@@ -1323,6 +1323,7 @@ class MLP(GeneratorFailureProbabilityInference):
         self.loss_fn_name = loss
         self.model.to(device)
         self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.epochs_trained = 0
 
         train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(self.val_data, batch_size=batch_size, shuffle=False)
@@ -1564,6 +1565,10 @@ class MLP(GeneratorFailureProbabilityInference):
                 if self.verbose:
                     print(f"[early stop] {stopper.stop_reason} at epoch {ep}")
                 break
+        self.epochs_trained = ep
+        if self.loss_fn_name == 'focal_loss':
+            self.focal_loss_kwargs['gamma_end'] = gammas_focal_[ep-1].item()
+            self.focal_loss_kwargs['alpha_end'] = alphas_focal_[ep-1, :].cpu().numpy()
 
         # --- restore best weights ---
         if early_stopping and stopper.best_state is not None:
@@ -1611,9 +1616,10 @@ class MLP(GeneratorFailureProbabilityInference):
         X_df = X.copy()
 
         # standardize selected features
+
         if self.standardize is True and self.scaler_feature is not None:
             X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(
-                X_df[self.feature_cols].to_numpy()
+                X_df[self.feature_cols]
             )
             stand_targets = list(self.target_cols)  # for regression only
         elif isinstance(self.standardize, list) and self.scaler_feature is not None:
@@ -1623,7 +1629,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 if c in self.standardize and c in X_df.columns
             ]
             X_df.loc[:, stand_feat] = self.scaler_feature.transform(
-                X_df[stand_feat].to_numpy()
+                X_df[stand_feat]
             )
             stand_targets = [c for c in self.target_cols if c in self.standardize]
         else:
@@ -1641,8 +1647,9 @@ class MLP(GeneratorFailureProbabilityInference):
 
         if self.loss_fn_name in ["cross_entropy", "focal_loss"]:
             # probabilities over classes
-            if self.loss_fn_name == "focal_loss":
-                y_pred = true_prob_focal_loss(torch.tensor(logits_or_out), gamma=self.focal_loss_kwargs['gamma']).numpy()
+            if self.loss_fn_name == "focal_loss" and ((self.focal_loss_kwargs['gamma_schedule'] == 'constant') or (self.focal_loss_kwargs.get('gamma_end', None) is not None )):
+                g = self.focal_loss_kwargs.get('gamma_end', self.focal_loss_kwargs['gamma'])
+                y_pred = true_prob_focal_loss(torch.tensor(logits_or_out), gamma=g).numpy()
             else:
                 y_pred = torch.softmax(torch.tensor(logits_or_out), dim=1).numpy()
             return y_pred
@@ -1652,7 +1659,7 @@ class MLP(GeneratorFailureProbabilityInference):
         if self.scaler_target is not None and stand_targets:
             y_df = pd.DataFrame(y_pred, columns=self.target_cols)
             y_df.loc[:, stand_targets] = self.scaler_target.inverse_transform(
-                y_df[stand_targets].to_numpy()
+                y_df[stand_targets]
             )
             y_pred = y_df[self.target_cols].to_numpy(dtype=np.float32)
         return y_pred
@@ -1712,6 +1719,7 @@ class MLP(GeneratorFailureProbabilityInference):
                 "val_loss": list(getattr(self, "val_loss", [])),
                 "val_loss_per_logit": getattr(self, "val_loss_per_logit", {}),
                 "num_parameters": getattr(self, "num_parameters", None),
+                "epochs_trained": getattr(self, "epochs_trained", 0),
                 "focal_loss_kwargs": getattr(self, "focal_loss_kwargs", None),
             },
         }
@@ -1778,6 +1786,7 @@ class MLP(GeneratorFailureProbabilityInference):
         obj.val_loss = train_section.get("val_loss", [])
         obj.val_loss_per_logit = train_section.get("val_loss_per_logit", {})
         obj.num_parameters = train_section.get("num_parameters", None)
+        obj.epochs_trained = train_section.get("epochs_trained", None)
         obj.focal_loss_kwargs = train_section.get("focal_loss_kwargs", None)
         if obj.focal_loss_kwargs is not None:
             obj.focal_loss_gamma = obj.focal_loss_kwargs.get("gamma", None)
