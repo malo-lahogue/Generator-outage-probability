@@ -269,9 +269,9 @@ def preprocess_data(
         discrete_keys.append("Technology")
 
     # Keys we want to keep explicitly before encoding
-    feat_keep = ["Datetime_UTC", "Final_gen_state"]
-    if "State" in merged_data.columns and "State" in feature_names:
-        feat_keep.append("State")
+    feat_keep = ["Datetime_UTC", "Final_gen_state", "State"]
+    # if "State" in merged_data.columns and "State" in feature_names:
+    #     feat_keep.append("State")
     if "Technology" in merged_data.columns and "Technology" in feature_names:
         feat_keep.append("Technology")
 
@@ -296,9 +296,10 @@ def preprocess_data(
     # ----------------- 6) State encoding -----------------
     if "State" in merged_data.columns:
         if state_filter != "all":
+            pass
             # Single state -> do not use as feature
-            if "State" in feature_names:
-                feature_names.remove("State")
+            # if "State" in feature_names:
+            #     feature_names.remove("State")
         else:
             if state_one_hot:
                 merged_data = pd.get_dummies(
@@ -307,8 +308,8 @@ def preprocess_data(
                     drop_first=False,
                     dtype=int,
                 )
-                if "State" in feature_names:
-                    feature_names.remove("State")
+                # if "State" in feature_names:
+                #     feature_names.remove("State")
                 feature_names += [c for c in merged_data.columns if c.startswith("State_")]
             else:
                 if "State" not in feature_names:
@@ -428,7 +429,7 @@ def preprocess_data(
 
     feature_names = [f for f in feature_names if f in merged_data.columns]
 
-    cols = feature_names + target_columns + ["Data_weight"]
+    cols = feature_names + target_columns + ["State", "Data_weight"]
     if initial_MC_state_filter == "all" and "Initial_gen_state" in merged_data.columns:
         cols = ["Initial_gen_state"] + cols
     cols = ["Datetime_UTC"] + cols
@@ -487,3 +488,36 @@ def preprocess_data(
 
 
     return train_val_df, test_df, feature_names, target_columns, integer_encoding
+
+
+def preprocess_baseline_logistic_regression_data(df: pd.DataFrame, load_stand_params: pd.DataFrame) -> tuple[pd.DataFrame, List]:
+    # 1. Remove the distinction between D and U states
+    df = df.copy()
+    df['Final_gen_state'] = df['Final_gen_state'].replace({2: 1})
+    df['Initial_gen_state'] = df['Initial_gen_state'].replace({2: 1})
+
+    # 2. Get the right features
+    feat = ['CDD', 'HDD', 'Load']
+
+    # De-standardize Load
+    destand_per_state = dict()
+    for _, row in load_stand_params.iterrows():
+        state = row['State'].upper()
+        destand_per_state[state] = lambda x: x * row['std_load'] + row['mean_load']
+
+
+    df['Load'] = df.apply(lambda row: destand_per_state[row['State']](row['Load']), axis=1)
+    df = df[['Datetime_UTC', 'Initial_gen_state', 'Final_gen_state'] + feat + ['Data_weight']].copy()
+
+    # Compress 
+    df = df.groupby(['Datetime_UTC', 'Initial_gen_state', 'Final_gen_state'] + feat, as_index=False).agg({'Data_weight': 'sum'})
+    
+    # Add features
+    df['Constant_hot'] = df['CDD'] == 0
+    df['Constant_cold'] = df['HDD'] == 0
+
+    df['CDD_2'] = df['CDD'] ** 2
+    df['HDD_2'] = df['HDD'] ** 2
+    
+    feature_names = feat + ['Constant_hot', 'Constant_cold', 'CDD_2', 'HDD_2']
+    return df, feature_names

@@ -42,6 +42,8 @@ from sklearn.neighbors import KernelDensity
 # ── XGBoost ─────────────────────────────────────────────────────────────────────
 import xgboost as xgb
 
+import preprocess_data as ppd
+
 
 
 
@@ -225,7 +227,7 @@ class GeneratorFailureProbabilityInference:
         """
         # --- guards on required attributes ---
         for attr in ("feature_cols", "target_cols"):
-            if not hasattr(self, attr) or getattr(self, attr) is None:
+            if not hasattr(self, attr) or getattr(self, attr) is None and self.__class__.__name__ != "LogisticRegressionBaseline":
                 raise AttributeError(
                     f"{self.__class__.__name__}.prepare_data requires '{attr}' to be set "
                     "(usually done in build_model)."
@@ -245,6 +247,12 @@ class GeneratorFailureProbabilityInference:
                 raise ValueError("train_idx and val_idx must be disjoint.")
             if max(list(train_idx) + list(val_idx)) >= len(data):
                 raise IndexError("train_idx or val_idx contains out-of-bounds indices.")
+            
+        if self.__class__.__name__ == "LogisticRegressionBaseline":
+            load_stand_params = pd.read_csv('../Data/standardization_params_by_state.csv')
+            data, feat_logist  = ppd.preprocess_baseline_logistic_regression_data(data, load_stand_params)
+            
+            # self.feature_cols = feat_logist
 
 
         # --- clone dataset and store config ---
@@ -361,7 +369,7 @@ class GeneratorFailureProbabilityInference:
             self.dataset_df = ds
 
         # --- construct train / val splits ---
-        if self.__class__.__name__ == "MLP":
+        if self.__class__.__name__ in ["MLP", "LogisticRegressionBaseline"]:
             # use torch Dataset wrapper for MLP
             ds_torch = GeneratorDataset(
                 ds,
@@ -2602,3 +2610,292 @@ class xgboostModel(GeneratorFailureProbabilityInference):
 
         plt.tight_layout()
         plt.show()
+
+
+class LogisticRegressionBaseline(GeneratorFailureProbabilityInference):
+    def __init__(self,  verbose: bool = True):
+        super().__init__(verbose=verbose)
+        self.model = None
+        self.feature_cols = ['CDD', 'HDD', 'Load', 'Constant_hot', 'Constant_cold', 'CDD_2', 'HDD_2']
+
+        self.pytorch_optimizers = {
+            'adam': torch.optim.Adam,
+            'sgd': torch.optim.SGD,
+            'rmsprop': torch.optim.RMSprop,
+        }
+
+    def build_model(self, target_cols: list[str],):
+        self.target_cols = target_cols
+
+        in_dim = len(self.feature_cols)
+
+        model = nn.Sequential()
+        model.add_module('linear', nn.Linear(in_dim, 1, bias=True))
+        self.model = model
+
+    def train_model(
+        self,
+        optimizer: Literal["adam", "sgd", "rmsprop"] = "adam",
+        regularization_type: Optional[str] = "L2",
+        lambda_reg: float | list[float] = 1e-3,
+        epochs: int = 200,
+        batch_size: int = 200,
+        lr: float = 1e-3,
+        weights_data: bool = False,
+        device: str = "cpu",
+        # smart early stopping
+        early_stopping: bool = True,
+        patience: int = 20,
+        min_delta: float = 0.0,
+        flat_delta: float | None = None,
+        flat_patience: int | None = None,
+        flat_mode: str = "range",  # or "iqr"
+        rel_flat: float | None = 2e-3,
+        burn_in: int = 10,
+        # stability & scheduling
+        grad_clip_norm: Optional[float] = None,
+        lr_scheduler: Optional[Literal["plateau", "cosine", "onecycle"]] = None,
+        scheduler_kwargs: Optional[dict] = None,
+    ) -> None:
+        """
+        Train the MLP with optional data weights, smart early stopping, grad clipping,
+        and LR scheduling.
+
+        Parameters
+        ----------
+        optimizer : {'adam','sgd','rmsprop'}
+        loss : {'mse','mae','logloss','cross_entropy'}
+            For classification (problem_type='classification'), must be 'cross_entropy'.
+        regularization_type : {'L1','L2',None}
+        lambda_reg : float | list[float]
+            Scalar or per-epoch strengths (len == epochs) if regularization_type is not None.
+        epochs : int
+        batch_size : int
+        lr : float
+        device : str
+            'cpu' or 'cuda'.
+        """
+
+        # --- regularization schedule ---
+        if regularization_type is not None and not (
+            (isinstance(lambda_reg, (float, int)) and float(lambda_reg) > 0.0)
+            or (isinstance(lambda_reg, list) and len(lambda_reg) > 0)
+        ):
+            raise ValueError(
+                "With regularization, lambda_reg must be > 0 (float) or a non-empty list."
+            )
+
+        if isinstance(lambda_reg, (float, int)):
+            lambda_reg_arr = np.full(epochs, float(lambda_reg), dtype=np.float32)
+        else:
+            if len(lambda_reg) != epochs:
+                raise ValueError("lambda_reg list must have length equal to epochs.")
+            lambda_reg_arr = np.asarray(lambda_reg, dtype=np.float32)
+
+        # --- basic setup ---
+        if optimizer not in self.pytorch_optimizers:
+            raise KeyError(f"Unknown optimizer '{optimizer}'.")
+        self.optimizer_name = optimizer
+        self.model.to(device)
+        self.num_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.epochs_trained = 0
+
+        train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(self.val_data, batch_size=batch_size, shuffle=False)
+        loss_fn = nn.BCEWithLogitsLoss(reduction='none')
+        optim = self.pytorch_optimizers[optimizer](self.model.parameters(), lr=lr)
+
+        # --- LR scheduler (optional) ---
+        scheduler = None
+        scheduler_kwargs = scheduler_kwargs or {}
+        if lr_scheduler == "constant":
+            scheduler = torch.optim.lr_scheduler.ConstantLR(optim,factor=1.0,total_iters=0)
+        elif lr_scheduler == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optim,
+                mode="min",
+                factor=scheduler_kwargs.get("factor", 0.5),
+                patience=scheduler_kwargs.get("patience", 5),
+                cooldown=scheduler_kwargs.get("cooldown", 0),
+                min_lr=scheduler_kwargs.get("min_lr", 1e-6),
+            )
+        elif lr_scheduler == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optim, T_max=max(1, epochs)
+            )
+        elif lr_scheduler == 'linear':
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optim,
+                start_factor=scheduler_kwargs.get("start_factor", 1.0),
+                end_factor=scheduler_kwargs.get("end_factor", 0.0),
+                total_iters=max(1, epochs)
+            )
+        elif lr_scheduler == "exponential":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optim,
+                gamma=scheduler_kwargs.get("gamma", 0.9)
+            )
+        elif lr_scheduler == "onecycle":
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optim,
+                max_lr=lr,
+                steps_per_epoch=max(1, len(train_loader)),
+                epochs=epochs,
+            )
+
+
+        # --- weighted reduction helper ---
+        def _reduce_elemwise_loss(tensor: torch.Tensor, w: Optional[torch.Tensor]):
+            """
+            Convert elementwise loss to a scalar:
+
+            - tensor: [B] or [B, ...]
+            - w: per-sample weights of shape [B] or None
+
+            1) If tensor has extra dims, mean over them -> [B]
+            2) If weights are provided, do weighted mean over batch
+            else, simple mean over batch.
+            """
+            # tensor: [B] or [B, ...] -> per-sample mean over feature dims, then (weighted) mean over batch
+            if tensor.ndim > 1:
+                per_sample = tensor.view(tensor.size(0), -1).mean(dim=1)  # [B]
+            else:
+                per_sample = tensor  # [B]
+
+            if w is None:
+                return per_sample.mean()
+
+            w = w.to(per_sample.dtype)
+            denom = torch.clamp(w.sum(), min=1e-12)
+            return (per_sample * w).sum() / denom
+
+        # --- one epoch over a loader ---
+        def step(loader, train: bool, epoch: int):
+            self.model.train() if train else self.model.eval()
+            total, n = 0.0, 0
+            with torch.set_grad_enabled(train):
+                for batch in loader:
+                    if len(batch) == 3:
+                        xb, yb, wb = batch
+                        wb = wb.to(device) if weights_data else None
+                    else:
+                        xb, yb = batch
+                        wb = None
+
+                    xb = xb.to(device)
+                    yb = yb.to(device)
+                    yb = yb.view(-1, 1).float()
+
+                    yhat = self.model(xb)             # logits or continuous output
+
+                    elem = loss_fn(yhat, yb)          # elementwise, shape [B] or [B,...]
+                    loss_val = _reduce_elemwise_loss(elem, wb)
+
+
+                    # regularization
+                    if regularization_type == 'L1':
+                        l1 = sum(p.abs().sum() for p in self.model.parameters())
+                        loss_val = loss_val + lambda_reg_arr[epoch-1] * l1 / self.num_parameters
+                    elif regularization_type == 'L2':
+                        l2 = sum(p.pow(2).sum() for p in self.model.parameters())
+                        loss_val = loss_val + lambda_reg_arr[epoch-1] * l2 / self.num_parameters
+
+                    if train:
+                        optim.zero_grad()
+                        loss_val.backward()
+                        if grad_clip_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
+                        optim.step()
+
+                    # bs = xb.size(0)
+                    bs = wb.sum().item() if wb is not None else xb.size(0)
+                    total += loss_val.item() * bs
+                    n     += bs
+            return total / max(1, n)
+
+        # --- early stopper ---
+        stopper = EarlyStopper(
+            min_delta=min_delta,
+            patience=patience,
+            burn_in=burn_in,
+            flat_delta=flat_delta,
+            flat_patience=flat_patience,
+            flat_mode=flat_mode,
+            rel_flat=rel_flat,
+        )
+
+        # --- training loop ---
+        for ep in range(1, epochs + 1):
+            train_loss = step(train_loader, True, ep)
+            val_loss = step(val_loader, False, ep)
+            self.val_loss.append(val_loss)
+
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            elif scheduler is not None:
+                scheduler.step()
+
+            if self.verbose:
+                print(
+                    f"Epoch {ep:03d}: train={train_loss:.4e} | val={val_loss:.4e}"
+                )
+
+            if early_stopping and stopper.step(val_loss, model=self.model):
+                if self.verbose:
+                    print(f"[early stop] {stopper.stop_reason} at epoch {ep}")
+                break
+        self.epochs_trained = ep
+        
+        # --- restore best weights ---
+        if early_stopping and stopper.best_state is not None:
+            self.model.load_state_dict(stopper.best_state)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        Predict targets for new inputs, honoring training-time standardization.
+
+        For classification:
+            - returns class probabilities of shape (N, num_classes).
+        For regression:
+            - returns raw outputs of shape (N, len(target_cols)), optionally inverse-transformed.
+        """
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model first.")
+
+        device = next(self.model.parameters()).device
+        X_df = X.copy()
+
+        # standardize selected features
+
+        if self.standardize is True and self.scaler_feature is not None:
+            X_df.loc[:, self.feature_cols] = self.scaler_feature.transform(
+                X_df[self.feature_cols]
+            )
+            stand_targets = list(self.target_cols)  # for regression only
+        elif isinstance(self.standardize, list) and self.scaler_feature is not None:
+            stand_feat = [
+                c
+                for c in self.feature_cols
+                if c in self.standardize and c in X_df.columns
+            ]
+            X_df.loc[:, stand_feat] = self.scaler_feature.transform(
+                X_df[stand_feat]
+            )
+            stand_targets = [c for c in self.target_cols if c in self.standardize]
+        else:
+            stand_targets = []
+
+        X_np = X_df[self.feature_cols].to_numpy(dtype=np.float32)
+        logits_or_out = (
+            self.model(
+                torch.tensor(X_np, dtype=torch.float32, device=device)
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
+            # probabilities over classes
+        y_pred = torch.sigmoid(torch.tensor(logits_or_out)).numpy()
+        return y_pred
+
+
