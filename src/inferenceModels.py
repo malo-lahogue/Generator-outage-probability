@@ -248,9 +248,9 @@ class GeneratorFailureProbabilityInference:
             if max(list(train_idx) + list(val_idx)) >= len(data):
                 raise IndexError("train_idx or val_idx contains out-of-bounds indices.")
             
-        if self.__class__.__name__ == "LogisticRegressionBaseline":
-            load_stand_params = pd.read_csv('../Data/standardization_params_by_state.csv')
-            data, feat_logist  = ppd.preprocess_baseline_logistic_regression_data(data, load_stand_params)
+        # if self.__class__.__name__ == "LogisticRegressionBaseline":
+        #     load_stand_params = pd.read_csv('../DATA/standardization_params_by_state.csv')
+        #     data, feat_logist  = ppd.preprocess_baseline_logistic_regression_data(data, load_stand_params)
             
             # self.feature_cols = feat_logist
 

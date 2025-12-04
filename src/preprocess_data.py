@@ -302,14 +302,19 @@ def preprocess_data(
             #     feature_names.remove("State")
         else:
             if state_one_hot:
+                print(f"'State' in merged_data.columns : {'State' in merged_data.columns}")
+                states = merged_data['State']
                 merged_data = pd.get_dummies(
                     merged_data,
                     columns=["State"],
                     drop_first=False,
                     dtype=int,
                 )
+                merged_data['State'] = states
+                print(f"'State' in merged_data.columns : {'State' in merged_data.columns}")
                 # if "State" in feature_names:
-                #     feature_names.remove("State")
+                #     # feature_names.remove("State")
+                #     print("'State' in feature_names")
                 feature_names += [c for c in merged_data.columns if c.startswith("State_")]
             else:
                 if "State" not in feature_names:
@@ -445,6 +450,8 @@ def preprocess_data(
         merged_data[tcol] = merged_data[tcol].astype(np.int32)
 
     for fcol in feature_names:
+        if fcol == 'State':
+            continue
         merged_data[fcol] = merged_data[fcol].astype(np.float32)
 
     merged_data["Data_weight"] = merged_data["Data_weight"].astype(np.float32)
@@ -511,6 +518,7 @@ def preprocess_baseline_logistic_regression_data(df: pd.DataFrame, load_stand_pa
 
     # Compress 
     df = df.groupby(['Datetime_UTC', 'Initial_gen_state', 'Final_gen_state'] + feat, as_index=False).agg({'Data_weight': 'sum'})
+    df = df.reset_index(drop=True)
     
     # Add features
     df['Constant_hot'] = df['CDD'] == 0
