@@ -394,7 +394,9 @@ def _successive_halving_single(
                 # ---------- Score ----------
                 # Determine metric: default 'cross_entropy'
                 if hasattr(model_obj, "val_loss"):
-                    score = float(np.min(model_obj.val_loss))
+                    sc = [s for s in model_obj.val_loss if s >= 0]
+                    score = float(sc[-1])
+                    # score = float(model_obj.val_loss[-1]) #float(np.min(model_obj.val_loss))
                 else:
                     metric_name = "cross_entropy"
                     if val_metric_per_model:

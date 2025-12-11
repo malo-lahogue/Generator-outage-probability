@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     # Grid search params
     p.add_argument("--result_csv",    type=Path, default=THIS_DIR / "../Results/grid_search_log")# .csv added later
     p.add_argument("--top_keep",      type=percent01, default=0.33, help="Fraction kept at each halving level.")
+    p.add_argument("--num_folds_cv",      type=int, default=5, help="Number of folds for the cross validation.")
     p.add_argument("--val_frac",      type=percent01, default=0.20, help="Validation fraction.")
     p.add_argument("--reuse_results", default=True, help="Reuse rows already computed in result.")
 
@@ -53,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",   type=int, default=42, help="Random seed for splits / reproducibility.")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"],
                    help="Default device to request in model specs.")
-    p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp", "both"],
+    p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp", "logistic_reg"],
                    help='Which models to include: "xgb", "mlp", or "both".')
 
     return p.parse_args()
@@ -133,7 +134,11 @@ def main() -> None:
                                                                                                 dropNA = True,
                                                                                                 feature_na_drop_threshold = 0.2,
                                                                                                 )
-
+    # train_val_df = train_val_df.loc[train_val_df['Initial_gen_state']!=0].copy().reset_index(drop=True)
+    # load_stand_params = pd.read_csv('../DATA/standardization_params_by_state.csv')
+    # train_val_df, feature_names  = ppd.preprocess_baseline_logistic_regression_data(train_val_df, load_stand_params)
+    train_val_df['Final_gen_state'] = train_val_df['Final_gen_state'].replace({2:1})
+    
     if "Initial_gen_state" in feature_names:
         feature_names.remove("Initial_gen_state")
     # subset_length = 100
@@ -170,8 +175,9 @@ def main() -> None:
                         "early_stopping_rounds" : 10,
                         "device"          : args.device,     
                         }
-    xgb_common_prepare_data = {"train_ratio": 0.80, 
-                            "val_ratio": 0.2,
+    xgb_common_prepare_data = {
+                            # "train_ratio": 0.80, 
+                            # "val_ratio": 0.2,
                             "standardize":stand_cols, 
                             "reweight_train_data_density":'Temperature'}
     xgb_common_train = {
@@ -195,23 +201,36 @@ def main() -> None:
     mlp_common_build = {
         "feature_cols": feature_names,
         "target_cols":  target_columns,
-        "num_classes": 3 if args.final_state == "all" else 2,
+        "num_classes": 2# if args.final_state == "all" else 2,
     }
 
-    mlp_common_prepare_data = {"train_ratio": 0.80, 
-                               "val_ratio": 0.2,
-                               "standardize":stand_cols, 
-                               "reweight_train_data_density":'Temperature'}
-    
-    mlp_common_train =  {
+    mlp_common_prepare_data = {
+        # "train_ratio": 0.80,
+        # "val_ratio": 0.2,
+        "standardize": stand_cols,
+        "reweight_train_data_density": 'Temperature'
+    }
+
+    mlp_common_train = {
                         "optimizer": "adam",
                         "loss": "focal_loss",
                         "regularization_type": "L2",
                         "weights_data": True,
                         "device": args.device,
-                        "early_stopping": False,
                         "grad_clip_norm": 1.0,
+                        "early_stopping": True,
+                        "patience"            : 10,
+                        "min_delta"           : 1e-5,
+                        "flat_delta"          : 2e-5,
+                        "flat_patience"       : 10,
+                        "flat_mode"           : 'iqr',
+                        "rel_flat"            : 2e-3,
+                        "burn_in"             : 20,
                         }
+
+    #                 Stop only when BOTH conditions hold:
+    #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
+    #                   • Flat-window: range in last `flat_patience` epochs <= flat_delta (abs or relative).
     
 
     mlp_build_grid = {
@@ -219,46 +238,90 @@ def main() -> None:
                         # (256, 512, 256, 128, 64), # 5 layers
                         # (512, 512, 256, 128, 64), # 5 layers
                         # (128, 128, 128, 128, 64), # 5 layers
-                        (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, ) # 10 layers
-                        # (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,) # 12 layers
+                        # (128, 64, 64, 32, 32, 32, 16, 16), # 8 layers
+                        # (256, 512, 512, 256, 128, 64, 64, 64, 64, 64, ) # 10 layers
+                        (128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,) # 12 layers
                         ],
         "activations": [
                         # ("relu",) * 5,
-                        ("relu",) * 10,
-                        # ("relu",) * 12,
+                        # ("relu",) * 8,
+                        # ("relu",) * 10,
+                        ("relu",) * 12,
                         ],
     }
     
     mlp_prepare_data_grid = {
-                                "reweight_power": [0.0, 0.5, 1.0, 1.5, 2.0]
+                                "reweight_power": [0.0] #  [0.0, 1.0, 1.5, 2.0]
                             }
     
     mlp_train_grid = {
                     "epochs"              : [100],   # upper bound — levels will cap
                     "batch_size"          : [512],
-                    "lambda_reg"          : [5e-2, 1e-3, 5e-3], # 1e-3
-                    "lr"                  : [5e-5, 1e-4, 2e-4, 4e-4, 1e-3, 2e-3],
-                    "focal_loss_alpha"    : [[1.0, 1.0, 1.0]],#[0.01, 0.985, 0.985],[1.0, 1.0, 1.0]
+                    "lambda_reg"          : [1e-3], # [1e-3]. 5e-2, 1e-3, 5e-3
+                    "lr"                  : [5e-4, 1e-3, 2e-3], #[5e-4, 1e-3, 2e-3]
+                    "focal_loss_alpha"    : [[1.0, 1.0]],#[0.01, 0.985, 0.985],[1.0, 1.0, 1.0]
                     "focal_loss_alpha_schedule" : ['constant'],  # ['constant', 'linear', 'exponential', 'cosine']
-                    "focal_loss_gamma"    : [0.0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0], # [0.0, 0.5, 1, 1.5, 2.0, 2.5, 3.0]
+                    "focal_loss_gamma"    : [0.0], # [0.0, 0.5, 1, 1.5, 2.0, 2.5, 3.0] 1.0, 2.0, 3.0, 4.0
                     "focal_loss_gamma_schedule" : ['constant'], # ['constant', 'linear', 'exponential', 'cosine']
-                    "lr_scheduler"          : ['exponential', 'cosine'],  # ['constant', 'linear', 'exponential', 'cosine']
-                    # "patience"            : [20],
-                    # "min_delta"           : [5e-5],
-                    # "flat_delta"          : [1e-4],
-                    # "flat_patience"       : [50],
-                    # "flat_mode"           : ['iqr'],
-                    # "rel_flat"            : [2e-3],
-                    # "burn_in"             : [150],
+                    "focal_loss_gamma_schedule_length" : [100], # [50, 100, 250, 500]
+                    "lr_scheduler"          : ['linear'],  # ['constant', 'linear', 'exponential', 'cosine']
                     }
+
+    # 3) ######### Logistic Regression #########
+
+    logistic_common_build = {
+        "target_cols":  target_columns,
+    }
+
+    logistic_common_prepare_data = {
+        # "train_ratio": 0.80,
+        # "val_ratio": 0.2,
+        # "standardize": stand_cols,
+    }
+
+    logistic_common_train = {
+                        "optimizer": "adam",
+                        "regularization_type": "L2",
+                        "weights_data": True,
+                        "device": args.device,
+                        "grad_clip_norm": 1.0,
+                        "early_stopping": True,
+                        "patience"            : 10,
+                        "min_delta"           : 1e-5,
+                        "flat_delta"          : 2e-5,
+                        "flat_patience"       : 10,
+                        "flat_mode"           : 'iqr',
+                        "rel_flat"            : 2e-3,
+                        "burn_in"             : 10000,
+                        }
+
     #                 Stop only when BOTH conditions hold:
     #                   • No-improve: best hasn't improved by min_delta for `patience` epochs, AND
     #                   • Flat-window: range in last `flat_patience` epochs <= flat_delta (abs or relative).
+    
+
+    logistic_build_grid = {    }
+
+    logistic_prepare_data_grid = {}
+    
+    logistic_train_grid = {
+                    "epochs"              : [50, 100, 250, 500],   # upper bound — levels will cap
+                    "batch_size"          : [512],
+                    "lambda_reg"          : [5e-4, 1e-3, 5e-3, 5e-2,], # 1e-3
+                    "lr"                  : [1e-4, 2e-4, 5e-4, 1e-3, 2e-3],
+                    "lr_scheduler"          : ['exponential', 'cosine'],  # ['constant', 'linear', 'exponential', 'cosine']
+                    }
+
+
+
+
+    
 
 
     # Choose models from CLI
     include_xgb = "xgb" in args.models or "both" in args.models
     include_mlp = "mlp" in args.models or "both" in args.models
+    include_logistic_reg = "logistic_reg" in args.models or "both" in args.models
 
     model_specs = []
     if include_xgb:
@@ -283,6 +346,17 @@ def main() -> None:
             "common_train": mlp_common_train,
             "train_grid":   mlp_train_grid,
         })
+    if include_logistic_reg:
+        model_specs.append({
+            "name":         "Logistic_Regression",
+            "constructor":  lambda: im.LogisticRegressionBaseline(verbose=False),
+            "common_build": logistic_common_build,
+            "build_grid":   logistic_build_grid,
+            "common_prepare_data": logistic_common_prepare_data,
+            "prepare_data_grid":   logistic_prepare_data_grid,
+            "common_train": logistic_common_train,
+            "train_grid":   logistic_train_grid,
+        })
 
     if not model_specs:
         raise SystemExit("No models selected. Use --models xgb|mlp|both")
@@ -301,7 +375,7 @@ def main() -> None:
 
     training_levels = [
         # {"name": "L1-fast",   "epochs": 15,  "data_cap": int(n_rows * 0.50)},
-        {"name": "L3-full",   "epochs": 100, "data_cap": None},
+        {"name": "L3-full",   "epochs": 500, "data_cap": None},
     ]
 
     # ---------- Run search ----------
@@ -315,6 +389,7 @@ def main() -> None:
         val_metric_per_model=val_metric,
         levels=training_levels,
         top_keep_ratio=args.top_keep,
+        num_folds_cv=args.num_folds_cv,
         resume=args.reuse_results,
         # reweight_train_data_density='Temperature',
         seed=args.seed,

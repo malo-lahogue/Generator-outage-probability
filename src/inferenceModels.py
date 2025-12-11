@@ -99,7 +99,7 @@ def focal_loss(
         probs = F.softmax(logits, dim=1)            # (N, C)
 
     pt = probs[torch.arange(len(targets)), targets]  # (N,)
-    pt = torch.clamp(pt, min=1e-12, max=1.0)  # numerical stability
+    pt = torch.clamp(pt, min=1e-12, max=1.0-1e-6)  # numerical stability
 
     a = alpha[torch.arange(len(targets)), targets]  # (N,)
 
@@ -1254,6 +1254,7 @@ class MLP(GeneratorFailureProbabilityInference):
         loss: Literal["mse", "mae", "logloss", "cross_entropy", "focal_loss"] = "cross_entropy",
         focal_loss_gamma: float | None = None,
         focal_loss_gamma_schedule: Optional[str] = None,
+        focal_loss_gamma_schedule_length: Optional[str] = None,
         focal_loss_alpha: np.ndarray | None = None,
         focal_loss_alpha_schedule: Optional[str] = None,
         regularization_type: Optional[str] = "L2",
@@ -1384,16 +1385,20 @@ class MLP(GeneratorFailureProbabilityInference):
             if focal_loss_alpha is None:
                 focal_loss_alpha = 1.0 / self.num_classes
             
+            sch_epoch = epochs if focal_loss_gamma_schedule_length is None else int(focal_loss_gamma_schedule_length)
+            gamma_min = 0.1
             if focal_loss_gamma_schedule == 'constant' or focal_loss_gamma_schedule is None or focal_loss_gamma==0.0:
-                gammas_focal_ = torch.ones(epochs, device=device).unsqueeze(1) * focal_loss_gamma
+                gammas_focal_ = torch.ones(sch_epoch, device=device).unsqueeze(1) * focal_loss_gamma
             elif focal_loss_gamma_schedule == 'linear':
-                gammas_focal_ = torch.linspace(focal_loss_gamma, 0.0, epochs, device=device).unsqueeze(1)
+                gammas_focal_ = torch.linspace(focal_loss_gamma, gamma_min, sch_epoch, device=device).unsqueeze(1)
             elif focal_loss_gamma_schedule == 'exponential':
-                gammas_focal_ = torch.logspace(np.log10(focal_loss_gamma), np.log10(1e-2), epochs, device=device).unsqueeze(1)
+                gammas_focal_ = torch.logspace(np.log10(focal_loss_gamma), np.log10(gamma_min), sch_epoch, device=device).unsqueeze(1)
             elif focal_loss_gamma_schedule == 'cosine':
-                gammas_focal_ = (focal_loss_gamma / 2) * (1 + torch.cos(torch.linspace(0, np.pi, epochs, device=device))).unsqueeze(1)
+                gammas_focal_ = ((focal_loss_gamma - gamma_min)/ 2) * (1 + torch.cos(torch.linspace(0, np.pi, sch_epoch, device=device))).unsqueeze(1) + gamma_min
             else:
                 raise ValueError(f"Unknown focal_loss_gamma_schedule '{focal_loss_gamma_schedule}'.")
+            # extend to full epochs if needed
+            gammas_focal_ = torch.cat([gammas_focal_, torch.zeros(epochs-sch_epoch, device=device).unsqueeze(1)]) if sch_epoch < epochs else gammas_focal_
             
             if focal_loss_alpha_schedule == 'constant' or focal_loss_alpha_schedule is None:
                 alphas_focal_ = torch.tensor(np.array([np.ones(epochs)*a for a in focal_loss_alpha]).T, device=device)

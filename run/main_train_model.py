@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",   type=int, default=42, help="Random seed for splits / reproducibility.")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"],
                    help="Default device to request in model specs.")
-    p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp"],
+    p.add_argument("--models", type=str, nargs="+", default=["both"], choices=["xgb", "mlp", "logistic_reg"],
                    help='Which models to include: "xgb" or "mlp".')
 
     return p.parse_args()
@@ -134,6 +134,21 @@ def main() -> None:
                                                                                 
     if "Initial_gen_state" in feature_names:
         feature_names.remove("Initial_gen_state")
+    # train_val_df['Initial_gen_state'] = 0
+    # train_val_df = train_val_df.loc[train_val_df['Initial_gen_state']==0]
+
+    states = ['Pennsylvania', 'New York', 'New Jersey', 'Maryland', 'Delaware', 'Virginia', 'West Virginia', 'Ohio']
+    states = [s.upper() for s in states]
+    train_val_df = train_val_df.loc[train_val_df['State'].str.upper().isin(states)].copy().reset_index(drop=True)
+
+    for feat in feature_names:
+        if feat.startswith("State_"):
+            if feat.split("_")[1] not in states:
+                feature_names.remove(feat)
+                if feat in train_val_df.columns:
+                    train_val_df.drop(columns=[feat], inplace=True)
+    
+    
 
 
     # subset_length = 100
@@ -151,7 +166,7 @@ def main() -> None:
     target_columns.sort()
 
     # ---------- Path to save model ----------
-    path_to_save = {model_name:THIS_DIR / "../Results/Models" / f"model_{model_name.upper()}_Tech_{args.technologies}_fr_{args.initial_state}_to_{args.final_state}_State_{args.states}.pth" 
+    path_to_save = {model_name:THIS_DIR / "../Results/Models" / f"model_{model_name.upper()}_CE_Tech_{args.technologies}_fr_{args.initial_state}_to_{args.final_state}_State_{args.states}.pth" 
                             for model_name in args.models}
 
     if "xgb" in args.models:
@@ -184,11 +199,14 @@ def main() -> None:
 
     elif "mlp" in args.models:
 
-        build_kw = {"activations": ["relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu"], "feature_cols": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "DayOfWeek_cos", "DayOfWeek_sin", "DayOfYear_cos", "DayOfYear_sin", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Heat_index_isnan", "Holiday", "Hourly_load_change", "Load", "Month_cos", "Month_sin", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Season_cos", "Season_sin", "Snow_depth", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Weekend", "Wet_bulb_temperature", "Wind_chill", "Wind_chill_isnan", "Wind_speed"], "hidden_sizes": [256, 512, 512, 256, 128, 64, 64, 64, 64, 64], "num_classes": 3, "target_cols": ["Final_gen_state"]}
-        train_kw = {"batch_size": 512, "device": "cuda", "early_stopping": False, "epochs": 100, "focal_loss_alpha": [1.0, 1.0, 1.0], "focal_loss_alpha_schedule": "constant", "focal_loss_gamma": 3.0, "focal_loss_gamma_schedule": "constant", "grad_clip_norm": 1.0, "lambda_reg": 0.05, "loss": "focal_loss", "lr": 0.0001, "lr_scheduler": "constant", "optimizer": "adam", "regularization_type": "L2", "weights_data": True}
+        build_kw = {"activations": ["relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu", "relu"], "feature_cols": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "DayOfWeek_cos", "DayOfWeek_sin", "DayOfYear_cos", "DayOfYear_sin", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Heat_index_isnan", "Holiday", "Hourly_load_change", "Load", "Month_cos", "Month_sin", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Season_cos", "Season_sin", "Snow_depth", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Weekend", "Wet_bulb_temperature", "Wind_chill", "Wind_chill_isnan", "Wind_speed"], "hidden_sizes": [128, 128, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64], "num_classes": 3, "target_cols": ["Final_gen_state"]}
+        data_kw = {"reweight_power": 1.0, "reweight_train_data_density": "Temperature", "standardize": ["1d_load_sum", "24h_max_load", "24h_min_load", "2d_load_sum", "CDD", "CDD3d", "Dew_point_temperature", "Extreme_cold", "Extreme_heat", "FDD", "FDD3d", "HDD", "HDD3d", "Heat_index", "Hourly_load_change", "Load", "Precip_1d", "Precip_3d", "Precipitation", "Pressure_3hr_change", "Relative_humidity", "Sea_level_pressure", "Snow_depth", "Station_level_pressure", "Temperature", "Tmax", "Tmean", "Tmin", "Wet_bulb_temperature", "Wind_chill", "Wind_speed"]}
+        train_kw = {"batch_size": 512, "burn_in": 200, "device": "cuda", "early_stopping": True, "epochs": 100, "flat_delta": 2e-05, "flat_mode": "iqr", "flat_patience": 10, "focal_loss_alpha": [1.0, 1.0, 1.0], "focal_loss_alpha_schedule": "constant", "focal_loss_gamma": 0.1, "focal_loss_gamma_schedule": "constant", "grad_clip_norm": 1.0, "lambda_reg": 0.005, "loss": "focal_loss", "lr": 0.002, "lr_scheduler": "linear", "min_delta": 1e-05, "optimizer": "adam", "patience": 10, "regularization_type": "L2", "rel_flat": 0.002, "weights_data": True}
 
 
-        mlp_model = im.MLP(verbose=False)
+
+
+        mlp_model = im.MLP(verbose=True)
         # mlp_model.build_model(feature_cols=feature_names,
         #                     target_cols=target_columns,
         #                     num_classes=3 if args.final_state == "all" else 2,
@@ -196,12 +214,12 @@ def main() -> None:
         #                     activations=("relu",) * 8)
         mlp_model.build_model(**build_kw)
 
-        mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature', seed=args.seed)
-
+        # mlp_model.prepare_data(train_val_df, train_ratio=0.80, val_ratio=0.2, standardize=stand_cols, reweight_train_data_density='Temperature', seed=args.seed)
+        mlp_model.prepare_data(train_val_df, split_ratios=(0.80, 0.20), **data_kw)
         mlp_model.train_model(**train_kw)
         # mlp_model.train_model(optimizer='adam', 
         #                       loss='focal_loss',
-        #                       focal_loss_alpha=[1.0, 1.0], focal_loss_gamma=2,
+        #                       focal_loss_alpha=[1.0, 1.0, 1.0], focal_loss_gamma=2,
         #                       focal_loss_alpha_schedule='constant', focal_loss_gamma_schedule='constant',
         #                         regularization_type='L2', lambda_reg=1e-3,
         #                         weights_data=True,
@@ -209,9 +227,9 @@ def main() -> None:
         #                         device=args.device,
 
         #                         # smart stopping knobs
-        #                         early_stopping=False, 
-        #                         # patience=20, min_delta=5e-5,
-        #                         # flat_delta=1e-4, flat_patience=50, flat_mode='iqr', rel_flat=2e-3, burn_in=150,
+        #                         early_stopping=True, 
+        #                         patience=10, min_delta=1e-5,
+        #                         flat_delta=2e-5, flat_patience=10, flat_mode='iqr', rel_flat=2e-3, burn_in=30,
         #                         # stability & LR policy
         #                         grad_clip_norm=1.0,
         #                         lr_scheduler='constant', scheduler_kwargs={'factor':0.5, 'patience':3, 'min_lr':1e-6})
