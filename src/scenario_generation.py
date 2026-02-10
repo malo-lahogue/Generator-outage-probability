@@ -121,7 +121,8 @@ def get_stationary_distribution(transition_probability_matrix: np.ndarray) -> np
 def generate_unavailable_capacity_scenario_per_gen(
     covariates_inputs_df: pd.DataFrame,
     generators_data_df: pd.DataFrame,
-    models: dict,
+    transition_model: dict = None,
+    probs_df: pd.DataFrame = None,
     num_scenarios: int = 1000,
     min_scenarios_per_gen: int = 10,
 ) -> dict:
@@ -152,6 +153,8 @@ def generate_unavailable_capacity_scenario_per_gen(
     - scenarios_per_gen : dict[unit_id -> list[pd.DataFrame]]
         Each DataFrame has columns ['Datetime_UTC', 'Gen_state', 'UnitID'].
     """
+    if probs_df is None and transition_model is None:
+        raise ValueError("Either probs_df or transition_model must be provided.")
     # ---- State encoding ----
     state_labels = ["A", "D", "U"]
     label_to_idx = {s: i for i, s in enumerate(state_labels)}
@@ -166,32 +169,62 @@ def generate_unavailable_capacity_scenario_per_gen(
 
     # ---- Precompute transition probabilities as numpy array ----
     # P_all[from_state, t, to_state] with shape (3, T, 3)
-    P_all = np.empty((n_states, T, n_states), dtype=np.float64)
+    if probs_df is not None:
+        probs_df = probs_df.sort_values("Datetime_UTC").reset_index(drop=True)
+        dt = cov_df["Datetime_UTC"].to_numpy()
+        probs_df = probs_df.loc[probs_df["Datetime_UTC"].isin(dt)].copy()
 
-    for from_label, model in models.items():
-        if from_label not in label_to_idx:
-            raise KeyError(f"Unexpected initial state key in models: {from_label}")
-        from_idx = label_to_idx[from_label]
 
-        X_inputs = cov_df[model.feature_cols]
-        probs = np.asarray(model.predict(X_inputs), dtype=np.float64)  # (T, 3)
+        P_AA = probs_df["pAA"].to_numpy(dtype=np.float64)
+        P_AD = probs_df["pAD"].to_numpy(dtype=np.float64)
+        P_AO = probs_df["pAO"].to_numpy(dtype=np.float64)
+        P_DA = probs_df["pDA"].to_numpy(dtype=np.float64)
+        P_DD = probs_df["pDD"].to_numpy(dtype=np.float64)
+        P_OA = probs_df["pOA"].to_numpy(dtype=np.float64)
+        P_OO = probs_df["pOO"].to_numpy(dtype=np.float64)
+        if not P_DD[0]>= 0:
+            P_DD = np.zeros_like(P_DD)
+            P_DA = np.ones_like(P_DA)
 
-        if probs.ndim != 2 or probs.shape[1] != n_states:
-            raise ValueError(
-                f"Model for state {from_label} must return (T, {n_states}) "
-                f"probability array; got shape {probs.shape}."
-            )
 
-        # Normalize defensively to avoid any numerical drift
-        row_sums = probs.sum(axis=1, keepdims=True)
-        # If any row sum is zero, fall back to uniform
-        probs = np.divide(
-            probs,
-            row_sums,
-            out=np.full_like(probs, 1.0 / n_states),
-            where=row_sums > 0,
-        )
-        P_all[from_idx, :, :] = probs
+        P_all = np.empty((n_states, T, n_states), dtype=np.float64)
+        P_all[0, :, 0] = P_AA
+        P_all[0, :, 1] = P_AD
+        P_all[0, :, 2] = P_AO
+        P_all[1, :, 0] = P_DA
+        P_all[1, :, 1] = P_DD
+        P_all[1, :, 2] = 0
+        P_all[2, :, 0] = P_OA
+        P_all[2, :, 1] = 0
+        P_all[2, :, 2] = P_OO
+    else:
+        P_all = transition_model.predict(cov_df)
+    # P_all = np.empty((n_states, T, n_states), dtype=np.float64)
+
+    # for from_label, model in models.items():
+    #     if from_label not in label_to_idx:
+    #         raise KeyError(f"Unexpected initial state key in models: {from_label}")
+    #     from_idx = label_to_idx[from_label]
+
+    #     X_inputs = cov_df[model.feature_cols]
+    #     probs = np.asarray(model.predict(X_inputs), dtype=np.float64)  # (T, 3)
+
+    #     if probs.ndim != 2 or probs.shape[1] != n_states:
+    #         raise ValueError(
+    #             f"Model for state {from_label} must return (T, {n_states}) "
+    #             f"probability array; got shape {probs.shape}."
+    #         )
+
+    #     # Normalize defensively to avoid any numerical drift
+    #     row_sums = probs.sum(axis=1, keepdims=True)
+    #     # If any row sum is zero, fall back to uniform
+    #     probs = np.divide(
+    #         probs,
+    #         row_sums,
+    #         out=np.full_like(probs, 1.0 / n_states),
+    #         where=row_sums > 0,
+    #     )
+    #     P_all[from_idx, :, :] = probs
 
     # ---- How many scenarios per generator? ----
     # num_scenarios_per_gen ** num_generators >= num_scenarios 
@@ -204,15 +237,17 @@ def generate_unavailable_capacity_scenario_per_gen(
     scenarios_per_gen: dict = {}
 
     # ---- Loop over generators (outer loop only, time & scenarios are vectorized) ----
-    for unit in tqdm(
-        generators_data_df.itertuples(index=False),
-        total=len(generators_data_df),
-        desc="Generating per unit scenarios"):
+    # for unit in tqdm(
+    #     generators_data_df.itertuples(index=False),
+    #     total=len(generators_data_df),
+    #     desc="Generating per unit scenarios"):
+    for unit in generators_data_df.itertuples(index=False):
         
         # Expect these attribute names to match DataFrame column names
         unit_id = getattr(unit, "UnitID")
         start_date = getattr(unit, "Start_date")
         end_date = getattr(unit, "End_date")
+        start_state = getattr(unit, "Start_state")  # default to 'A' if not provided
 
         # Mask time window for this unit
         mask = (times >= start_date) & (times <= end_date)
@@ -231,23 +266,24 @@ def generate_unavailable_capacity_scenario_per_gen(
         # P_unit = P_all[:, idx_start:idx_end, :]
 
         # ---- Initial stationary distribution at t=0 from P_unit[:,0,:] ----
-        trans0 = P_all[:, idx_start, :]  # (3, 3)
-        pi0 = get_stationary_distribution(trans0)  # (3,)
+        # trans0 = P_all[:, idx_start:idx_start+72, :].mean(axis=1)  # (3, 3)
+        # pi0 = get_stationary_distribution(trans0)  # (3,)
 
         # Clip + renormalize for numerical safety
-        pi0 = np.clip(pi0, 0.0, None)
-        s = pi0.sum()
-        if s <= 0:
-            pi0 = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        else:
-            pi0 = pi0 / s
+        # pi0 = np.clip(pi0, 0.0, None)
+        # s = pi0.sum()
+        # if s <= 0:
+        #     pi0 = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        # else:
+        #     pi0 = pi0 / s
 
         K = num_scenarios_per_gen
         # simulate only inside [idx_start, idx_end)
         states = np.full((K, T), -1, dtype=np.int8)
 
         # initial state at idx_start
-        states[:, idx_start] = rng.choice(n_states, size=K, p=pi0)
+        # states[:, idx_start] = rng.choice(n_states, size=K, p=pi0)
+        states[:, idx_start] = label_to_idx.get(start_state)  # default to 'A' if start_state not provided
 
         # ---- Inhomogeneous Markov chain simulation (vectorized over K) ----
         for t in range(idx_start+1, idx_end):

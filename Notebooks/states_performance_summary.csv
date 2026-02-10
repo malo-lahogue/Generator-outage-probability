@@ -1,0 +1,13 @@
+Test,M,AR,AS,LR
+Unconditional KS,3,2,2,9
+Unconditional Quantile Coverage,2,5,5,4
+Conditional KS (Extreme Cold),4,6,1,5
+Conditional KS (Cold),4,4,3,5
+Conditional KS (Normal),3,2,5,6
+Conditional KS (Hot),2,4,2,8
+Conditional KS (Extreme Hot),4,2,2,8
+Conditional Quantile Coverage (Extreme Cold),5,5,4,2
+Conditional Quantile Coverage (Cold),6,4,3,3
+Conditional Quantile Coverage (Normal),2,5,4,5
+Conditional Quantile Coverage (Hot),2,5,5,4
+Conditional Quantile Coverage (Extreme Hot),4,7,2,3

@@ -1,4 +1,5 @@
-from typing import Dict,List,Tuple
+from typing import Dict,List,Tuple, Iterable
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -7,8 +8,45 @@ from pandas.tseries.holiday import USFederalHolidayCalendar
 
 
 
+def load_feature_bases(weather_path: Path, powerload_path: Path) -> list[str]:
+    weather = pd.read_csv(weather_path, parse_dates=["datetime"])
+    power =  pd.read_csv(powerload_path, parse_dates=["UTC time"])
+    base = list(weather.columns) + list(power.columns) + ['Season', 'Month', 'DayOfWeek', 'DayOfYear', 'Holiday', 'Weekend']#, 'Technology']
 
+    # Remove duplicates but keep stable order
+    seen = set()
+    base = [c for c in base if not (c in seen or seen.add(c))]
+    # Drop known non-features if present
+    drop = {'datetime', 'UTC time', 'Datetime_UTC', 'Datetime'}
+    feats = [c for c in base if c not in drop]
+    feats = list(set([(name[0].upper() + name[1:]) if isinstance(name, str) and name else name for name in feats]))
+    feats.sort()
+    return feats
 
+def load_cdf_per_state(train_df:pd.DataFrame, test_df:pd.DataFrame) -> np.array:
+    """Compute the empirical CDF of load values per state.
+    df must contain columns 'State' and 'Load'."""
+    test_df = test_df.copy()
+    test_df['Load_CDF'] = None
+    for state in test_df['State'].unique():
+        state_mask = train_df['State'] == state
+        state_loads = train_df.loc[state_mask, 'Load'].values
+        sorted_loads = np.sort(state_loads)
+        cdf = np.arange(1, len(sorted_loads) + 1) / len(sorted_loads)
+        test_df.loc[state_mask, 'Load_CDF'] = np.interp(test_df.loc[state_mask, 'Load'].values, sorted_loads, cdf)
+    return test_df['Load_CDF'].to_numpy(dtype=float)
+
+def load_cdf(train_df:pd.DataFrame, test_df:pd.DataFrame) -> np.array:
+    """Compute the empirical CDF of load values.
+    df must contain column 'Load'."""
+    test_df = test_df.copy()
+    test_df['Load_CDF'] = None
+
+    state_loads = train_df['Load'].values
+    sorted_loads = np.sort(state_loads)
+    cdf = np.arange(1, len(sorted_loads) + 1) / len(sorted_loads)
+    test_df['Load_CDF'] = np.interp(test_df['Load'].values, sorted_loads, cdf)
+    return test_df['Load_CDF'].to_numpy(dtype=float)
 
 def preprocess_data(
     failure_data_path: str,
@@ -107,6 +145,7 @@ def preprocess_data(
 
     # ----------------- 1) Load failure data -----------------
     failure_df = pd.read_csv(failure_data_path, parse_dates=["Datetime_UTC"])
+
     # Normalize column capitalization
     failure_df.columns = [
         (name[0].upper() + name[1:]) if isinstance(name, str) and name else name
@@ -120,6 +159,19 @@ def preprocess_data(
         failure_df = failure_df.rename(columns={"Count": "Data_weight"})
     if "Data_weight" not in failure_df.columns:
         failure_df["Data_weight"] = 1.0
+    # if "Hours_in_state" in failure_df.columns and "Hours_in_state" in feature_names:
+    #     h = failure_df["Hours_in_state"].values
+    #     h = np.floor(np.log10(h)*10)/10
+    #     failure_df['Hours_in_state'] = h
+    #     discrete_keys = ["Datetime_UTC", "State", "Initial_gen_state", "Final_gen_state", "Technology", "Hours_in_state"]
+    #     agg_dict = {col: "first" for col in failure_df.columns if col not in ["Data_weight"] + discrete_keys}
+    #     agg_dict["Data_weight"] = "sum"
+        
+    #     merged_data = (
+    #         failure_df.groupby(discrete_keys, as_index=False)
+    #         .agg(agg_dict)
+    #         .reset_index(drop=True)
+    #     )
 
     # Normalize state codes
     if "State" in failure_df.columns:
@@ -154,6 +206,9 @@ def preprocess_data(
         ].copy()
         feature_names = [f for f in feature_names if f != "State"]
 
+
+    print(f"(1) Loaded failure data")
+
     # ----------------- 2) Load weather data -----------------
     weather_df = pd.read_csv(
         weather_data_path,
@@ -163,6 +218,17 @@ def preprocess_data(
         (name[0].upper() + name[1:]) if isinstance(name, str) and name else name
         for name in weather_df.columns
     ]
+
+    # Temperature in Celsius
+    weather_df["Temperature"] = weather_df["Temperature"]*10
+
+    # Correct Relative Humidity bounds
+    weather_df["Relative_humidity"] = np.clip(weather_df["Relative_humidity"], 0, 100)
+
+    # Rolling temperature features
+    weather_df["Temperature_3Dsum_hot"] = rolling_hot_temp(temp=weather_df["Temperature"].values, T_nom=18.3, max_lag_hours=72)
+    weather_df["Temperature_3Dsum_cold"] = rolling_cold_temp(temp=weather_df["Temperature"].values, T_nom=18.3, max_lag_hours=72)
+    feature_names += ["Temperature_3Dsum_hot", "Temperature_3Dsum_cold"]
 
     # Normalize MultiIndex to (Datetime_UTC, State) in UTC
     weather_df["State"] = weather_df["State"].astype(str).str.upper()
@@ -195,6 +261,7 @@ def preprocess_data(
         weather_df.drop(columns=drop_cols, inplace=True)
         feature_names = [f for f in feature_names if f not in drop_cols]
 
+
     # Special handling for Heat_index and Wind_chill: keep, with *_isnan flags
     for col in ["Heat_index", "Wind_chill"]:
         if col in weather_df.columns and col in feature_names:
@@ -203,7 +270,7 @@ def preprocess_data(
             feature_names.append(isnan_col)
             weather_df[col] = weather_df[col].fillna(0.0)
 
-
+    print(f"(2) Loaded weather data")
     # ----------------- 3) Load power load data -----------------
     power_load_df = pd.read_csv(
         power_load_data_path,
@@ -238,6 +305,7 @@ def preprocess_data(
         power_load_df.drop(columns=drop_cols, inplace=True)
         feature_names = [f for f in feature_names if f not in drop_cols]
 
+    print(f"(3) Loaded power load data")
     # ----------------- 4) Merge all data -----------------
     # Join weather & load onto failure records by (Datetime_UTC, State)
     merged_data = failure_df.join(
@@ -254,7 +322,7 @@ def preprocess_data(
     merged_data.reset_index(drop=True, inplace=True)
 
 
-
+    print(f"(4) Merged data shape after joining: {merged_data.shape}")
     # ----------------- 5) Keep only relevant columns & aggregate -----------------
     # We want to aggregate duplicate rows (multiple units) by discrete keys
     # and sum Data_weight.
@@ -267,6 +335,10 @@ def preprocess_data(
         discrete_keys.append("Final_gen_state")
     if "Technology" in merged_data.columns and "Technology" in feature_names:
         discrete_keys.append("Technology")
+    if "Hours_in_state" in merged_data.columns and "Hours_in_state" in feature_names:
+        discrete_keys.append("Hours_in_state")
+
+
 
     # Keys we want to keep explicitly before encoding
     feat_keep = ["Datetime_UTC", "Final_gen_state", "State"]
@@ -292,7 +364,7 @@ def preprocess_data(
         .reset_index(drop=True)
     )
 
-
+    print(f"(5) Merged data shape after aggregation: {merged_data.shape}")
     # ----------------- 6) State encoding -----------------
     if "State" in merged_data.columns:
         if state_filter != "all":
@@ -302,7 +374,6 @@ def preprocess_data(
             #     feature_names.remove("State")
         else:
             if state_one_hot:
-                print(f"'State' in merged_data.columns : {'State' in merged_data.columns}")
                 states = merged_data['State']
                 merged_data = pd.get_dummies(
                     merged_data,
@@ -311,10 +382,6 @@ def preprocess_data(
                     dtype=int,
                 )
                 merged_data['State'] = states
-                print(f"'State' in merged_data.columns : {'State' in merged_data.columns}")
-                # if "State" in feature_names:
-                #     # feature_names.remove("State")
-                #     print("'State' in feature_names")
                 feature_names += [c for c in merged_data.columns if c.startswith("State_")]
             else:
                 if "State" not in feature_names:
@@ -329,6 +396,7 @@ def preprocess_data(
                     merged_data["State"] = merged_data["State"].map(cats)
                     integer_encoding["States"] = cats
 
+    print(f"(6) State encoding applied. Current features: {feature_names}")
     # ----------------- 7) Technology encoding -----------------
     if "Technology" in merged_data.columns:
         if technology_one_hot:
@@ -356,6 +424,7 @@ def preprocess_data(
                 merged_data["Technology"] = merged_data["Technology"].map(cats)
                 integer_encoding["Technologies"] = cats
 
+    print(f"(7) Technology encoding applied. Current features: {feature_names}")
     # ----------------- 8) Calendar features -----------------
     # Season
     if "Season" in feature_names:
@@ -395,6 +464,7 @@ def preprocess_data(
     if "Weekend" in feature_names:
         merged_data["Weekend"] = merged_data["Datetime_UTC"].dt.weekday >= 5
 
+    print(f"(8) Calendar features added. Current features: {feature_names}")
     # ----------------- 9) Target construction -----------------
     target_columns = ["Final_gen_state"]
     if isinstance(merged_data.loc[merged_data.index[0], "Final_gen_state"], str):
@@ -410,6 +480,7 @@ def preprocess_data(
         gen_state_encoding = integer_encoding.get("Final_gen_state", {})
         merged_data["Initial_gen_state"] = merged_data["Initial_gen_state"].map(gen_state_encoding)
 
+    print(f"(9) Target columns constructed. Current features: {feature_names}")
     # ----------------- 10) Cyclic feature encoding -----------------
     for feat in list(cyclic_features):
         if feat not in merged_data.columns:
@@ -429,6 +500,7 @@ def preprocess_data(
         feature_names += [f"{feat}_sin", f"{feat}_cos"]
         merged_data.drop(columns=[feat], inplace=True, errors="ignore")
 
+    print(f"(10) Cyclic feature encoding applied. Current features: {feature_names}")
     # ----------------- 11) Final column selection & dtypes -----------------
     # Preserve original feature order where possible
 
@@ -459,6 +531,7 @@ def preprocess_data(
     # Sort by time
     merged_df = merged_data.sort_values(by="Datetime_UTC").reset_index(drop=True)
 
+    print(f"(11) Final merged data shape: {merged_df.shape}")
     # ----------------- 12) Train/test split by periods -----------------
     if test_periods:
         mask_test = pd.Series(False, index=merged_df.index)
@@ -500,8 +573,10 @@ def preprocess_data(
 def preprocess_baseline_logistic_regression_data(df: pd.DataFrame, load_stand_params: pd.DataFrame) -> tuple[pd.DataFrame, List]:
     # 1. Remove the distinction between D and U states
     df = df.copy()
-    df['Final_gen_state'] = df['Final_gen_state'].replace({2: 1})
-    df['Initial_gen_state'] = df['Initial_gen_state'].replace({2: 1})
+    if 'Final_gen_state' in df.columns:
+        df['Final_gen_state'] = df['Final_gen_state'].replace({2: 1})
+    if 'Initial_gen_state' in df.columns:
+        df['Initial_gen_state'] = df['Initial_gen_state'].replace({2: 1})
 
     # 2. Get the right features
     feat = ['CDD', 'HDD', 'Load']
@@ -529,3 +604,86 @@ def preprocess_baseline_logistic_regression_data(df: pd.DataFrame, load_stand_pa
     
     feature_names = feat + ['Constant_hot', 'Constant_cold', 'CDD_2', 'HDD_2']
     return df, feature_names
+
+
+
+def therm_load_stress(temp: float, load: float, T_nom = 18.3, L_rated=0.5) -> float:
+    """Compute a stress metric based on temperature and power load."""
+    # Simple example: stress increases with temperature and load
+    stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
+    return stress
+
+def cooling_stress(temp, humidity, B=0.4) -> float:
+    """Compute a stress metric based on temperature and humidity."""
+    # Example: stress increases with temperature and humidity
+    stress = temp + B * humidity
+    return stress
+
+def rolling_hot_temp(temp: np.array,
+                    T_nom: float,
+                    max_lag_hours: int = 72) -> np.array:
+    """
+    Add ψ_hot(x_t) = sum_{τ=0}^{max_lag} exp(-τ/τ_half) * max(0, temp_{t-τ} - T_nom)
+    as a new column 'psi_hot'.
+
+    df must have columns 'Datetime_UTC' and 'Temperature' on an hourly grid.
+    """
+    tau_half = max_lag_hours / 2.0
+
+    # excess temperature above threshold
+    excess = np.maximum(0.0, temp - T_nom)   # shape (N,)
+
+    # exponential weights for τ = 0..max_lag
+    tau = np.arange(max_lag_hours + 1, dtype=float)
+    weights = np.exp(-tau / tau_half)
+
+    # causal convolution: each point t sees its past up to max_lag_hours
+    psi = np.convolve(excess, weights, mode="full")[: len(excess)]
+
+    return psi
+
+def rolling_cold_temp(temp: np.array,
+                    T_nom: float,
+                    max_lag_hours: int = 72) -> np.array:
+    """
+    Add ψ_cold(x_t) = sum_{τ=0}^{max_lag} exp(-τ/τ_half) * max(0, T_nom - temp_{t-τ})
+    as a new column 'psi_cold'.
+
+    df must have columns 'Datetime_UTC' and 'Temperature' on an hourly grid.
+    """
+    tau_half = max_lag_hours / 2.0
+
+    # excess temperature above threshold
+    excess = np.maximum(0.0, T_nom - temp)   # shape (N,)
+
+    # exponential weights for τ = 0..max_lag
+    tau = np.arange(max_lag_hours + 1, dtype=float)
+    weights = np.exp(-tau / tau_half)  
+
+    # causal convolution: each point t sees its past up to max_lag_hours
+    psi = np.convolve(excess, weights, mode="full")[: len(excess)]
+
+    return psi
+
+def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None) -> np.array:
+    """Combine multiple stress metrics into a single composite stress metric."""
+    if weights is not None:
+        if len(psi_list) != len(weights):
+            raise ValueError("Length of psi_list must match length of weights.")
+
+    comp = np.array([w * psi ** 2 for w, psi in zip(weights, psi_list)]).sum(axis=0) if weights is not None else np.sum(psi_list, axis=0)
+    comp = np.sqrt(comp)
+    return comp
+
+def load_cdf_per_state(train_df:pd.DataFrame, test_df:pd.DataFrame) -> np.array:
+    """Compute the empirical CDF of load values per state.
+    df must contain columns 'State' and 'Load'."""
+    test_df = test_df.copy()
+    test_df['Load_CDF'] = None
+    for state in test_df['State'].unique():
+        state_mask = train_df['State'] == state
+        state_loads = train_df.loc[state_mask, 'Load'].values
+        sorted_loads = np.sort(state_loads)
+        cdf = np.arange(1, len(sorted_loads) + 1) / len(sorted_loads)
+        test_df.loc[state_mask, 'Load_CDF'] = np.interp(test_df.loc[state_mask, 'Load'].values, sorted_loads, cdf)
+    return test_df['Load_CDF'].to_numpy(dtype=float)
