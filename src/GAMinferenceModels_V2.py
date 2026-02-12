@@ -1,6 +1,7 @@
 # Import libraries
 
 # Data processing and manipulation
+from __future__ import annotations
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -13,6 +14,9 @@ from dataclasses import dataclass
 from functools import reduce
 import operator
 import os
+
+import joblib
+import time
 
 
 # Machine learning models
@@ -31,6 +35,8 @@ import preprocess_data as ppd
 
 # Typing
 from typing import Iterable, Any, Tuple, Dict, Optional, Callable
+
+
 
 
 
@@ -61,6 +67,7 @@ def build_region_dataset(
     train_df, test_df = add_engineered_features(train_df, test_df, region)
 
     # 3) compute weights
+    print(region, len(train_df), len(test_df))
     train_df, test_df, ess = add_importance_weights(
         train_df, test_df,
         region,
@@ -856,6 +863,89 @@ def export_gam_predictions(
         data.to_csv(out_path, index=False)
         print(f"[OK] wrote {out_path} | n={len(data)}")
 
+
+
+def export_transition_model_bundle(
+    filepath: str,
+    *,
+    transition_models_by_region: Dict[str, Any],
+    scalers_by_region: Optional[Dict[str, Any]] = None,
+    feature_cols: Optional[list[str]] = None,
+    zscore_cols: Optional[list[str]] = None,
+    model_type: str = "GAM",
+    extra_metadata: Optional[dict] = None,
+) -> None:
+    """
+    Save a lightweight bundle containing:
+      - per-region stage models (RegionTrainingResult.models)
+      - per-region scaler (if any)
+      - metadata
+
+    Parameters
+    ----------
+    transition_models_by_region:
+        typically the object returned by train_all_region_transition_models
+        (dict region -> RegionTrainingResult)
+    scalers_by_region:
+        dict region -> fitted scaler (StandardScaler) or None
+    feature_cols, zscore_cols:
+        stored for later checks / convenience
+    model_type:
+        "GAM" or "LR" (or whatever string you want)
+    """
+    # Extract only the trained estimators (avoid saving train/test dfs)
+    models_only: Dict[str, dict] = {}
+    for region, region_result in transition_models_by_region.items():
+        # region_result is expected to be RegionTrainingResult
+        if not hasattr(region_result, "models"):
+            raise TypeError(
+                f"Expected each region entry to have a `.models` attribute. "
+                f"Got type={type(region_result)} for region={region}."
+            )
+        models_only[region] = region_result.models
+
+    bundle = {
+        "bundle_version": 1,
+        "created_unix": time.time(),
+        "model_type": model_type,
+        "feature_cols": feature_cols,
+        "zscore_cols": zscore_cols,
+        "models_by_region": models_only,
+        "scalers_by_region": scalers_by_region,  # may be None
+        "extra_metadata": extra_metadata or {},
+    }
+
+    joblib.dump(bundle, filepath, compress=3)
+
+
+def load_transition_model_bundle(
+    filepath: str,
+) -> Tuple[Dict[str, dict], Optional[Dict[str, Any]], dict]:
+    """
+    Load a bundle saved by export_transition_model_bundle.
+
+    Returns
+    -------
+    models_by_region : dict[region -> dict(stage_name -> model)]
+    scalers_by_region: dict[region -> scaler] or None
+    metadata         : dict
+    """
+    bundle = joblib.load(filepath)
+
+    if not isinstance(bundle, dict) or "models_by_region" not in bundle:
+        raise ValueError("Not a valid model bundle file (missing 'models_by_region').")
+
+    models_by_region = bundle["models_by_region"]
+    scalers_by_region = bundle.get("scalers_by_region", None)
+    metadata = {
+        "bundle_version": bundle.get("bundle_version"),
+        "created_unix": bundle.get("created_unix"),
+        "model_type": bundle.get("model_type"),
+        "feature_cols": bundle.get("feature_cols"),
+        "zscore_cols": bundle.get("zscore_cols"),
+        "extra_metadata": bundle.get("extra_metadata", {}),
+    }
+    return models_by_region, scalers_by_region, metadata
 
 
 

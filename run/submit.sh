@@ -1,14 +1,13 @@
 #!/bin/bash 
-#####SBATCH -p mit_preemptable
+#SBATCH -p mit_preemptable
 #####SBATCH -p mit_normal
-#SBATCH -p mit_normal_gpu
+######SBATCH -p mit_normal_gpu
 #####SBATCH -p mit_quicktest
 #SBATCH -c 5
 #SBATCH --gpus-per-node=1
 ####SBATCH --exclusive
-#SBATCH --mem 200G
-#####SBATCH --time=48:00:00 
-#SBATCH --time=6:00:00 
+#SBATCH --mem 500G
+#SBATCH --time=48:00:00
 #SBATCH --output=./logs/log%A_%a.out
 #SBATCH --error=./logs/error%A_%a.err
 #####SBATCH -o ./logs/log%A_%a.txt
