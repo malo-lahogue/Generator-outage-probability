@@ -155,6 +155,8 @@ def add_engineered_features(train_df, test_df, region):
 
     # stress modes
     T_nom = 25  # Nominal temperature in Celsius
+    T_cold = 0
+    T_hot = 35
     L_rated = 1.0  # Rated load in per unit (example value)
 
     #    train data
@@ -163,16 +165,13 @@ def add_engineered_features(train_df, test_df, region):
     load_tr = train_df['Load_CDF'].values
 
 
-    psi1_tr = therm_load_stress(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
-    psi2_tr = cooling_stress(temp_tr, humid_tr)
-    psi3_tr = train_df['Temperature_3Dsum_hot'].values
-    psi4_tr = train_df['Temperature_3Dsum_cold'].values
+    psi1_tr, psi2_tr = therm_load_stress(temp_tr, load_tr,  T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    psi3_tr = cooling_stress(temp_tr, humid_tr,  T_nom=T_nom)
 
     train_df['psi1'] = psi1_tr
     train_df['psi2'] = psi2_tr
     train_df['psi3'] = psi3_tr
-    train_df['psi4'] = psi4_tr
-    train_df['Stress'], mu_train, sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr], weights=np.ones(4)/4)
+    train_df['Stress'], sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
 
     if train_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for training for state {region}!")
@@ -182,16 +181,13 @@ def add_engineered_features(train_df, test_df, region):
     humid_te = test_df['Relative_humidity'].values
     load_te = test_df['Load_CDF'].values
 
-    psi1_te = therm_load_stress(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
-    psi2_te = cooling_stress(temp_te, humid_te)
-    psi3_te = test_df['Temperature_3Dsum_hot'].values
-    psi4_te = test_df['Temperature_3Dsum_cold'].values
+    psi1_te, psi2_te = therm_load_stress(temp_te, load_te, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    psi3_te = cooling_stress(temp_te, humid_te,  T_nom=T_nom)
 
     test_df['psi1'] = psi1_te
     test_df['psi2'] = psi2_te
     test_df['psi3'] = psi3_te
-    test_df['psi4'] = psi4_te
-    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te], weights=np.ones(4)/4, mu_list=mu_train, sigma_list=sigma_train)
+    test_df['Stress'], _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train)
 
     if test_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for testing for state {region}!")
@@ -199,33 +195,39 @@ def add_engineered_features(train_df, test_df, region):
     return train_df, test_df
 
 
-def therm_load_stress(temp: float, load: float, T_nom = 25, L_rated=0.5) -> float:
+def therm_load_stress(temp: float, load: float, T_cold=0, T_hot=35, L_rated=0.5) -> float:
     """Compute a stress metric based on temperature and power load."""
     # Simple example: stress increases with temperature and load
-    stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
-    return stress
+    # stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
+    stress_cold = np.maximum(0, T_cold - temp) * (load / L_rated)
+    stress_hot = np.maximum(0, temp - T_hot) * (load / L_rated)
+    return stress_cold, stress_hot
 
-def cooling_stress(temp, humidity, B=0.4) -> float:
+def cooling_stress(temp, humidity, T_nom, B=0.4) -> float:
     """Compute a stress metric based on temperature and humidity."""
     # Example: stress increases with temperature and humidity
-    stress = temp + B * humidity
+    stress = np.maximum(0, temp - T_nom) + B * humidity
     return stress
 
 
-def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None, mu_list: Iterable[float] = None, sigma_list: Iterable[float] = None) -> np.array:
+def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None, sigma_list: Iterable[float] = None) -> np.array:
     """Combine multiple stress metrics into a single composite stress metric."""
     if weights is not None:
         if len(psi_list) != len(weights):
             raise ValueError("Length of psi_list must match length of weights.")
     
-    if mu_list is None or sigma_list is None:
-        mu_list = [np.mean(psi) for psi in psi_list]
+    if sigma_list is None:
         sigma_list = [np.std(psi) for psi in psi_list]
-    # Standardize each psi to have mean 0 and std 1
-    psi_list = [(psi - mu) / sigma for psi, mu, sigma in zip(psi_list, mu_list, sigma_list)]
+
+    # # Standardize each psi to have mean 0 and std 1
+    # psi_list = [(psi - mu) / sigma for psi, mu, sigma in zip(psi_list, mu_list, sigma_list)]
+
+    # Scale each psi to have std 1
+    psi_list = [psi / sigma for psi, sigma in zip(psi_list, sigma_list)]
+
     comp = np.array([w * psi ** 2 for w, psi in zip(weights, psi_list)]).sum(axis=0) if weights is not None else np.sum(psi_list, axis=0)
     comp = np.sqrt(comp)
-    return comp, mu_list, sigma_list
+    return comp, sigma_list
 
 
 ###### Importance weights ##########
@@ -465,10 +467,10 @@ def train_region_transition_model(
             models[name] = m
         # fit_binary_model(m, X, y, sample_weight=w)
 
-    _fit(make_stage_A_leave(train_df), "A_leave", lam_grid=np.logspace(-1, 1, 6))
-    _fit(make_stage_A_DO(train_df), "A_DO", lam_grid=np.logspace(0, 2, 10))
-    _fit(make_stage_D_leave(train_df), "D_leave", lam_grid=np.logspace(1, 3, 11))
-    _fit(make_stage_O_leave(train_df), "O_leave", lam_grid=np.logspace(1, 3, 11))
+    _fit(make_stage_A_leave(train_df), "A_leave", lam_grid=np.logspace(-3, 3, 11))
+    _fit(make_stage_A_DO(train_df), "A_DO", lam_grid=np.logspace(-3, 3, 11))
+    _fit(make_stage_D_leave(train_df), "D_leave", lam_grid=np.logspace(-3, 3, 11))
+    _fit(make_stage_O_leave(train_df), "O_leave", lam_grid=np.logspace(-3, 3, 11))
 
     return models, scalers
 
