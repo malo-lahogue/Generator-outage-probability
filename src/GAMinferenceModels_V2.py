@@ -490,7 +490,7 @@ def predict_transition_probs(models: Dict[str, Any], X, scalers: Dict[str, Stand
     def _p1(name):
         m = models.get(name, None)
         sca = scalers.get(name, None)
-        if sca is not None:
+        if sca is not None and hasattr(m, "feature_names_in_"):
             Xs = X.copy()
             Xs[sca.feature_names_in_] = sca.transform(X[sca.feature_names_in_])
             X_use = Xs
@@ -567,9 +567,12 @@ def feat_scale_transform(X: pd.DataFrame, zscore_cols: list[str]) -> Tuple[pd.Da
     Returns scaled DataFrame and the scaler used.
     """
     scaler = StandardScaler()
-    X_scaled = X.copy()
-    X_scaled[zscore_cols] = scaler.fit_transform(X[zscore_cols])
-    return X_scaled, scaler
+    if len(zscore_cols) == 0:
+        return X, scaler  # no scaling needed
+    else:
+        X_scaled = X.copy()
+        X_scaled[zscore_cols] = scaler.fit_transform(X[zscore_cols])
+        return X_scaled, scaler
 
 # -------------------------------
 # 2) Base model factory options
