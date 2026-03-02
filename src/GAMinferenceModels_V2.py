@@ -155,6 +155,8 @@ def add_engineered_features(train_df, test_df, region):
 
     # stress modes
     T_nom = 25  # Nominal temperature in Celsius
+    T_cold = 25
+    T_hot = 25
     L_rated = 1.0  # Rated load in per unit (example value)
 
     #    train data
@@ -163,16 +165,19 @@ def add_engineered_features(train_df, test_df, region):
     load_tr = train_df['Load_CDF'].values
 
 
-    psi1_tr = therm_load_stress(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
-    psi2_tr = cooling_stress(temp_tr, humid_tr)
-    psi3_tr = train_df['Temperature_3Dsum_hot'].values
-    psi4_tr = train_df['Temperature_3Dsum_cold'].values
+    # psi1_tr = therm_load_stress(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
+    psi1_tr, psi2_tr = therm_load_stress(temp_tr, load_tr, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    psi3_tr = cooling_stress(temp_tr, humid_tr)
+    # psi3_tr = train_df['Temperature_3Dsum_hot'].values
+    # psi4_tr = train_df['Temperature_3Dsum_cold'].values
 
     train_df['psi1'] = psi1_tr
     train_df['psi2'] = psi2_tr
     train_df['psi3'] = psi3_tr
-    train_df['psi4'] = psi4_tr
-    train_df['Stress'], mu_train, sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr], weights=np.ones(4)/4)
+    # train_df['psi4'] = psi4_tr
+    # train_df['Stress'], mu_train, sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr], weights=np.ones(4)/4)
+    train_df['Stress'], mu_train, sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
+
 
     if train_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for training for state {region}!")
@@ -182,16 +187,19 @@ def add_engineered_features(train_df, test_df, region):
     humid_te = test_df['Relative_humidity'].values
     load_te = test_df['Load_CDF'].values
 
-    psi1_te = therm_load_stress(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
-    psi2_te = cooling_stress(temp_te, humid_te)
-    psi3_te = test_df['Temperature_3Dsum_hot'].values
-    psi4_te = test_df['Temperature_3Dsum_cold'].values
+    # psi1_te = therm_load_stress(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
+    # psi2_te = cooling_stress(temp_te, humid_te)
+    # psi3_te = test_df['Temperature_3Dsum_hot'].values
+    # psi4_te = test_df['Temperature_3Dsum_cold'].values
+    psi1_te, psi2_te = therm_load_stress(temp_te, load_te, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    psi3_te = cooling_stress(temp_te, humid_te)
 
     test_df['psi1'] = psi1_te
     test_df['psi2'] = psi2_te
     test_df['psi3'] = psi3_te
-    test_df['psi4'] = psi4_te
-    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te], weights=np.ones(4)/4, mu_list=mu_train, sigma_list=sigma_train)
+    # test_df['psi4'] = psi4_te
+    # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te], weights=np.ones(4)/4, mu_list=mu_train, sigma_list=sigma_train)
+    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3, mu_list=mu_train, sigma_list=sigma_train)
 
     if test_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for testing for state {region}!")
@@ -199,11 +207,18 @@ def add_engineered_features(train_df, test_df, region):
     return train_df, test_df
 
 
-def therm_load_stress(temp: float, load: float, T_nom = 25, L_rated=0.5) -> float:
+# def therm_load_stress(temp: float, load: float, T_nom = 25, L_rated=0.5) -> float:
+#     """Compute a stress metric based on temperature and power load."""
+#     # Simple example: stress increases with temperature and load
+#     stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
+#     return stress
+
+def therm_load_stress(temp: float, load: float, T_cold=25, T_hot=25, L_rated=0.5) -> float:
     """Compute a stress metric based on temperature and power load."""
     # Simple example: stress increases with temperature and load
-    stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
-    return stress
+    stress_cold = np.maximum(0, T_cold - temp) * (load / L_rated)  # Stress from cold
+    stress_hot = np.maximum(0, temp - T_hot) * (load / L_rated)  # Stress from hot
+    return stress_cold, stress_hot
 
 def cooling_stress(temp, humidity, B=0.4) -> float:
     """Compute a stress metric based on temperature and humidity."""
@@ -903,6 +918,7 @@ def export_transition_model_bundle(
                 f"Got type={type(region_result)} for region={region}."
             )
         models_only[region] = region_result.models
+
 
     bundle = {
         "bundle_version": 1,
