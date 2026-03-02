@@ -155,8 +155,8 @@ def add_engineered_features(train_df, test_df, region):
 
     # stress modes
     T_nom = 25  # Nominal temperature in Celsius
-    T_cold = 0
-    T_hot = 35
+    T_cold = 25
+    T_hot = 25
     L_rated = 1.0  # Rated load in per unit (example value)
 
     #    train data
@@ -167,11 +167,15 @@ def add_engineered_features(train_df, test_df, region):
 
     psi1_tr, psi2_tr = therm_load_stress(temp_tr, load_tr,  T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
     psi3_tr = cooling_stress(temp_tr, humid_tr,  T_nom=T_nom)
+    psi4_tr = train_df['Temperature_3Dsum_hot'].values
+    psi5_tr = train_df['Temperature_3Dsum_cold'].values
 
     train_df['psi1'] = psi1_tr
     train_df['psi2'] = psi2_tr
     train_df['psi3'] = psi3_tr
-    train_df['Stress'], sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
+    train_df['psi4'] = psi4_tr
+    train_df['psi5'] = psi5_tr
+    train_df['Stress'], sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(5)/5)
 
     if train_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for training for state {region}!")
@@ -183,11 +187,15 @@ def add_engineered_features(train_df, test_df, region):
 
     psi1_te, psi2_te = therm_load_stress(temp_te, load_te, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
     psi3_te = cooling_stress(temp_te, humid_te,  T_nom=T_nom)
+    psi4_te = test_df['Temperature_3Dsum_hot'].values
+    psi5_te = test_df['Temperature_3Dsum_cold'].values
 
     test_df['psi1'] = psi1_te
     test_df['psi2'] = psi2_te
     test_df['psi3'] = psi3_te
-    test_df['Stress'], _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train)
+    test_df['psi4'] = psi4_te
+    test_df['psi5'] = psi5_te
+    test_df['Stress'], _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te, psi5_te], weights=np.ones(5)/5,  sigma_list=sigma_train)
 
     if test_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for testing for state {region}!")

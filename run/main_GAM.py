@@ -66,15 +66,28 @@ folder_name = "2022_2023_test_periods_highReg"
 
 ##### Train random split
 
-spline_version = '_SMC_5sALL_'
+spline_version = '5sALL_'
+model_name = '_MC_GAM_'
 gamma = 0.5
-feature_cols = ['Temperature', 'Load_CDF', 'psi1', 'psi2', 'psi3', 'psi4', 'Hours_in_state']
+# feature_cols = ['Temperature', 'Load_CDF', 'psi1', 'psi2', 'psi3', 'psi4', 'Hours_in_state']
+# feature_cols = ['Temperature', 'Load_CDF', 'psi1', 'psi2', 'psi3', 'Hours_in_state']
+# feature_cols = ['psi1', 'psi2', 'psi3', 'psi4', 'psi5', 'Hours_in_state']
+feature_cols = ['Temperature', 'Load_CDF', 'Relative_humidity']
+# feature_cols = ['Hours_in_state']
+
+# zscore_cols=["psi1", "psi2", "psi3", "psi4", "psi5"]
+zscore_cols = ['Temperature', 'Load_CDF', 'Relative_humidity']
+
+# zscore_cols = []
 
 
-transition_models_Ar, train_datasets_Ar, test_datasets_Ar, ess_res_Ar, scalers_Ar = gam_models.train_all_region_transition_models( all_data_df= all_data_df,
+
+
+
+transition_models, train_datasets, test_datasets, ess_res, scalers = gam_models.train_all_region_transition_models( all_data_df= all_data_df,
                                                                             regions= states_list[:1],
                                                                             feature_cols= feature_cols,
-                                                                            zscore_cols=["Temperature", "psi1", "psi2", "psi3", "psi4"],
+                                                                            zscore_cols=zscore_cols,
                                                                             regional_classifier_features= ['Temperature', 'Relative_humidity', 'Load_CDF', 'Temperature_3Dsum_hot', 'Temperature_3Dsum_cold', 'month_sin', 'month_cos'],
                                                                             # base_model_factory= base_model_factory,
                                                                             type_model='GAM',
@@ -88,17 +101,77 @@ transition_models_Ar, train_datasets_Ar, test_datasets_Ar, ess_res_Ar, scalers_A
                                                                             verbose= False)
 
 print("Transition model successfully trained ")
+print("Effective sample size results:", ess_res[states_list[0]], ess_res[states_list[0]]/len(all_data_df))
+
+gam_models.export_transition_model_bundle(
+    THIS_DIR/f"../Results/GAM/{folder_name}/{model_name}{spline_version}/model_bundle_gam.joblib",
+    transition_models_by_region=transition_models,
+    scalers_by_region=scalers,
+    feature_cols=feature_cols,
+    zscore_cols=zscore_cols,
+    model_type="GAM",
+    extra_metadata={"gamma": gamma, "clipping_quantile": 0.95},
+)
+
+print("Transition model bundle successfully exported")
 
 gam_models.export_gam_predictions(
-    transition_models= transition_models_Ar,
-    test_datasets= test_datasets_Ar,
-    scalers_by_region= scalers_Ar,
-    cols_export=['Datetime_UTC', 'State', 'Stress', 'Initial_gen_state', 'Final_gen_state', 'Data_weight', 'pAD', 'pAO', 'pDA', 'pOA'],
+    transition_models= transition_models,
+    test_datasets= test_datasets,
+    scalers_by_region= scalers,
+    cols_export=['Datetime_UTC', 'State', 'Stress', 'Initial_gen_state', 'Final_gen_state', 'Data_weight', 'pAD', 'pAO', 'pDA', 'pOA']+feature_cols,
     region_only=False,
     test=True,
     feature_cols= feature_cols,
-    out_dir=THIS_DIR/f'../Results/GAM/{folder_name}/Ar{spline_version}/',
-    model_name='Ar'
+    out_dir=THIS_DIR/f'../Results/GAM/{folder_name}/{model_name}{spline_version}/',
+    model_name=model_name
 )
 
 print("Transition model successfully exported")
+
+
+
+
+# transition_models_logistic, train_datasets_logistic, test_datasets_logistic, ess_res_logistic, scalers_logistic = gam_models.train_all_region_transition_models( all_data_df= all_data_df,
+#                                                                             regions= states_list[:1],
+#                                                                             feature_cols= feature_cols,
+#                                                                             zscore_cols=["psi1", "psi2", "psi3"],
+#                                                                             regional_classifier_features= ['Temperature', 'Relative_humidity', 'Load_CDF', 'Temperature_3Dsum_hot', 'Temperature_3Dsum_cold', 'month_sin', 'month_cos'],
+#                                                                             # base_model_factory= base_model_factory,
+#                                                                             type_model='LogisticRegression',
+#                                                                             test_frac= 0.2,
+#                                                                             specific_test_periods= specific_test_periods_per_state,
+#                                                                             seed= 42,
+#                                                                             w_region_consider= False,
+#                                                                             w_stress_consider= True,
+#                                                                             gamma= gamma,
+#                                                                             clipping_quantile= 0.95,
+#                                                                             verbose= False)
+
+# print("Transition model successfully trained ")
+
+# gam_models.export_transition_model_bundle(
+#     THIS_DIR/f"../Results/GAM/{folder_name}/LogisticReg/model_bundle_gam.joblib",
+#     transition_models_by_region=transition_models_logistic,
+#     scalers_by_region=scalers_logistic,
+#     feature_cols=feature_cols,
+#     zscore_cols=["psi1", "psi2", "psi3"],
+#     model_type="LogisticReg",
+#     extra_metadata={"gamma": gamma, "clipping_quantile": 0.95},
+# )
+
+# print("Transition model bundle successfully exported")
+
+# gam_models.export_gam_predictions(
+#     transition_models= transition_models_logistic,
+#     test_datasets= test_datasets_logistic,
+#     scalers_by_region= scalers_logistic,
+#     cols_export=['Datetime_UTC', 'State', 'Stress', 'Initial_gen_state', 'Final_gen_state', 'Data_weight', 'pAD', 'pAO', 'pDA', 'pOA']+feature_cols,
+#     region_only=False,
+#     test=True,
+#     feature_cols= feature_cols,
+#     out_dir=THIS_DIR/f'../Results/GAM/{folder_name}/LogisticReg/',
+#     model_name='LogisticReg'
+# )
+
+# print("Transition model successfully exported")
