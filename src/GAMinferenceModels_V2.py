@@ -67,7 +67,6 @@ def build_region_dataset(
     train_df, test_df = add_engineered_features(train_df, test_df, region)
 
     # 3) compute weights
-    print(region, len(train_df), len(test_df))
     train_df, test_df, ess = add_importance_weights(
         train_df, test_df,
         region,
@@ -155,8 +154,8 @@ def add_engineered_features(train_df, test_df, region):
 
     # stress modes
     T_nom = 25  # Nominal temperature in Celsius
-    T_cold = 25
-    T_hot = 25
+    T_cold = 0
+    T_hot = 35
     L_rated = 1.0  # Rated load in per unit (example value)
 
     #    train data
@@ -166,16 +165,29 @@ def add_engineered_features(train_df, test_df, region):
 
 
     psi1_tr, psi2_tr = therm_load_stress(temp_tr, load_tr,  T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    # psi1_tr = therm_load_stress(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
+
     psi3_tr = cooling_stress(temp_tr, humid_tr,  T_nom=T_nom)
     psi4_tr = train_df['Temperature_3Dsum_hot'].values
     psi5_tr = train_df['Temperature_3Dsum_cold'].values
 
+    psi6_tr = therm_load_stress_full(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
+    psi7_tr = cooling_stress_full(temp_tr, humid_tr,  T_nom=T_nom)
+    train_df['psi6'] = psi6_tr
+    train_df['psi7'] = psi7_tr
+
     train_df['psi1'] = psi1_tr
     train_df['psi2'] = psi2_tr
     train_df['psi3'] = psi3_tr
-    train_df['psi4'] = psi4_tr
-    train_df['psi5'] = psi5_tr
-    train_df['Stress'], sigma_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(5)/5)
+    # train_df['psi4'] = psi4_tr
+    # train_df['psi5'] = psi5_tr
+    # train_df['psi2'] = psi3_tr
+    # train_df['psi3'] = psi4_tr
+    # train_df['psi4'] = psi5_tr
+    # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(5)/5)
+    train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
+    # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(4)/4)
+
 
     if train_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for training for state {region}!")
@@ -186,16 +198,29 @@ def add_engineered_features(train_df, test_df, region):
     load_te = test_df['Load_CDF'].values
 
     psi1_te, psi2_te = therm_load_stress(temp_te, load_te, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
+    # psi1_te = therm_load_stress(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
+
     psi3_te = cooling_stress(temp_te, humid_te,  T_nom=T_nom)
     psi4_te = test_df['Temperature_3Dsum_hot'].values
     psi5_te = test_df['Temperature_3Dsum_cold'].values
 
+    psi6_te = therm_load_stress_full(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
+    psi7_te = cooling_stress_full(temp_te, humid_te,  T_nom=T_nom)
+    test_df['psi6'] = psi6_te
+    test_df['psi7'] = psi7_te
+
     test_df['psi1'] = psi1_te
     test_df['psi2'] = psi2_te
     test_df['psi3'] = psi3_te
-    test_df['psi4'] = psi4_te
-    test_df['psi5'] = psi5_te
-    test_df['Stress'], _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te, psi5_te], weights=np.ones(5)/5,  sigma_list=sigma_train)
+    # test_df['psi4'] = psi4_te
+    # test_df['psi5'] = psi5_te
+    # test_df['psi2'] = psi3_te
+    # test_df['psi3'] = psi4_te
+    # test_df['psi4'] = psi5_te
+    # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te, psi5_te], weights=np.ones(5)/5,  sigma_list=sigma_train, mu_list=mu_train)
+    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train, mu_list=mu_train)
+    # test_df['Stress'], _, _ = composit_stress([psi1_te, psi3_te, psi4_te, psi5_te], weights=np.ones(4)/4,  sigma_list=sigma_train, mu_list=mu_train)
+
 
     if test_df['Stress'].isna().any():
         raise ValueError(f"NaN values found in 'Stress' for testing for state {region}!")
@@ -203,29 +228,50 @@ def add_engineered_features(train_df, test_df, region):
     return train_df, test_df
 
 
-def therm_load_stress(temp: float, load: float, T_cold=0, T_hot=35, L_rated=0.5) -> float:
+def therm_load_stress(temp: float, load: float, T_nom=25, T_cold=0, T_hot=35, L_rated=0.5) -> float:
     """Compute a stress metric based on temperature and power load."""
     # Simple example: stress increases with temperature and load
     # stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
+    # return stress
     stress_cold = np.maximum(0, T_cold - temp) * (load / L_rated)
     stress_hot = np.maximum(0, temp - T_hot) * (load / L_rated)
     return stress_cold, stress_hot
+
+def therm_load_stress_full(temp: float, load: float, T_nom=25, L_rated=0.5) -> float:
+    """Compute a stress metric based on temperature and power load."""
+    # Simple example: stress increases with temperature and load
+    stress = (temp - T_nom) * (load / L_rated)  # Normalize temp and load
+    return stress
 
 def cooling_stress(temp, humidity, T_nom, B=0.4) -> float:
     """Compute a stress metric based on temperature and humidity."""
     # Example: stress increases with temperature and humidity
     stress = np.maximum(0, temp - T_nom) + B * humidity
+    # stress = temp + B * humidity
+    return stress
+
+def cooling_stress_full(temp, humidity, T_nom, B=0.4) -> float:
+    """Compute a stress metric based on temperature and humidity."""
+    # Example: stress increases with temperature and humidity
+    stress = temp + B * humidity
     return stress
 
 
-def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None, sigma_list: Iterable[float] = None) -> np.array:
+def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None, sigma_list: Iterable[float] = None, mu_list: Iterable[float] = None) -> np.array:
     """Combine multiple stress metrics into a single composite stress metric."""
     if weights is not None:
         if len(psi_list) != len(weights):
             raise ValueError("Length of psi_list must match length of weights.")
     
     if sigma_list is None:
-        sigma_list = [np.std(psi) for psi in psi_list]
+        # sigma_list = [np.std(psi) for psi in psi_list]
+        sigma_list = []
+        for psi in psi_list:
+            psi_ = psi[np.where(psi>0)[0]]  # compute std only on positive values to avoid distortion from zeros
+            sigma_ = np.std(psi_) if len(psi_) > 0 else 1.0  # avoid zero std
+            sigma_list.append(sigma_)
+    # if mu_list is None:
+    #     mu_list = [np.mean(psi) for psi in psi_list]
 
     # # Standardize each psi to have mean 0 and std 1
     # psi_list = [(psi - mu) / sigma for psi, mu, sigma in zip(psi_list, mu_list, sigma_list)]
@@ -235,7 +281,7 @@ def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = Non
 
     comp = np.array([w * psi ** 2 for w, psi in zip(weights, psi_list)]).sum(axis=0) if weights is not None else np.sum(psi_list, axis=0)
     comp = np.sqrt(comp)
-    return comp, sigma_list
+    return comp, sigma_list, mu_list
 
 
 ###### Importance weights ##########
@@ -249,24 +295,24 @@ def add_importance_weights(train_df, test_df,
         clipping_quantile
     ):
     ##### Compute region weights #####
-    train_df['is_region'] = (train_df['State'] == region).astype(int)
-    train_data_classifier = train_df.drop_duplicates(subset=['Datetime_UTC', 'State']).copy()
-    region_classifier = regional_classifier(
-        train_data=train_data_classifier,
-        region=region,
-        classifier_feats=regional_classifier_features,
-    )
+    # train_df['is_region'] = (train_df['State'] == region).astype(int)
+    # train_data_classifier = train_df.drop_duplicates(subset=['Datetime_UTC', 'State']).copy()
+    # region_classifier = regional_classifier(
+    #     train_data=train_data_classifier,
+    #     region=region,
+    #     classifier_feats=regional_classifier_features,
+    # )
 
-    p_train_region = region_classifier.predict_proba(train_df[regional_classifier_features])[:, 1]
-    p_test_region = region_classifier.predict_proba(test_df[regional_classifier_features])[:, 1]
-    eps = 1e-6
-    p_train_region = np.clip(p_train_region, eps, 1 - eps)
-    p_test_region  = np.clip(p_test_region,  eps, 1 - eps)
-    n_total = len(train_df)
-    n_target = np.sum(train_df['is_region'])
+    # p_train_region = region_classifier.predict_proba(train_df[regional_classifier_features])[:, 1]
+    # p_test_region = region_classifier.predict_proba(test_df[regional_classifier_features])[:, 1]
+    # eps = 1e-6
+    # p_train_region = np.clip(p_train_region, eps, 1 - eps)
+    # p_test_region  = np.clip(p_test_region,  eps, 1 - eps)
+    # n_total = len(train_df)
+    # n_target = np.sum(train_df['is_region'])
 
-    train_df['region_weight'] = (p_train_region / (n_target / n_total))
-    test_df['region_weight'] = (p_test_region / (n_target / n_total))
+    # train_df['region_weight'] = (p_train_region / (n_target / n_total))
+    # test_df['region_weight'] = (p_test_region / (n_target / n_total))
 
     ##### Compute stress weights #####
     # already computed Stress feature in add_engineered_features
@@ -467,7 +513,31 @@ def train_region_transition_model(
         #         terms = sum([s(i) for i in range(X.shape[1])])
         #         m = LogisticGAM(terms)
         if isinstance(m, LogisticGAM):
+            # print("BEFORE")
+            # for col in X.columns:
+            #     print(col)
+            #     try:
+            #         print(f" has na : {X[col].isna().any()}")
+            #     except Exception as e:
+            #         print(e)
+            #     try:
+            #         if pd.api.types.is_numeric_dtype(X[col]):
+            #             print(f" is finite : {np.isfinite(X[col].to_numpy()).all()}")
+            #     except Exception as e:
+            #         print(e)
             X, scaler = feat_scale_transform(X, zscore_cols)
+            # print("AFTER")
+            # for col in X.columns:
+            #     print(col)
+            #     try:
+            #         print(f" has na : {X[col].isna().any()}")
+            #     except Exception as e:
+            #         print(e)
+            #     try:
+            #         if pd.api.types.is_numeric_dtype(X[col]):
+            #             print(f" is finite : {np.isfinite(X[col].to_numpy()).all()}")
+            #     except Exception as e:
+            #         print(e)
             scalers[name] = scaler
             models[name] = fit_binary_gam_gcv(m, X, y, sample_weight=w, lam_grid=lam_grid, verbose=verbose)
         else:
@@ -498,7 +568,7 @@ def predict_transition_probs(models: Dict[str, Any], X, scalers: Dict[str, Stand
     def _p1(name):
         m = models.get(name, None)
         sca = scalers.get(name, None)
-        if sca is not None and hasattr(m, "feature_names_in_"):
+        if sca is not None and hasattr(sca, "feature_names_in_"):
             Xs = X.copy()
             Xs[sca.feature_names_in_] = sca.transform(X[sca.feature_names_in_])
             X_use = Xs
