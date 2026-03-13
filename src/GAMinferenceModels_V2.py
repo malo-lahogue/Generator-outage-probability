@@ -275,8 +275,13 @@ def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = Non
         sigma_list = []
         for psi in psi_list:
             where = np.where(psi>0)[0]
+<<<<<<< HEAD
             mean = np.average(psi[where], weights=weights_data[where])
             sigma = np.average((psi[where] - mean) ** 2, weights=weights_data[where]) ** 0.5 if len(where) > 0 else 1.0
+=======
+            mean = np.average(psi[where], weights=weights[where])
+            sigma = np.average((psi[where] - mean) ** 2, weights=weights[where]) ** 0.5 if len(where) > 0 else 1.0
+>>>>>>> a42a5a9350d3d9ac932c97f6e393fd8ec9350485
             # psi_ = psi[np.where(psi>0)[0]]  # compute std only on positive values to avoid distortion from zeros
             # sigma_ = np.std(psi_) if len(psi_) > 0 else 1.0  # avoid zero std
             sigma_list.append(sigma)
