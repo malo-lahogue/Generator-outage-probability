@@ -81,8 +81,11 @@ def build_region_dataset(
     test_df['w'] = test_df['Data_weight'] * test_df['w_importance']
 
 
+    relative_ess = ess/train_df['Data_weight'].sum()
 
-    return train_df, test_df, ess
+
+
+    return train_df, test_df, relative_ess
 
 
 
@@ -149,13 +152,15 @@ def add_engineered_features(train_df, test_df, region):
     ######################################################
 
     # compute load cdf
-    train_df['Load_CDF'] = ppd.load_cdf(train_df, train_df)
-    test_df['Load_CDF'] = ppd.load_cdf(train_df, test_df)
+    if 'Load_CDF' not in train_df.columns:
+        train_df['Load_CDF'] = ppd.load_cdf(train_df, train_df)
+    if 'Load_CDF' not in test_df.columns:
+        test_df['Load_CDF'] = ppd.load_cdf(train_df, test_df)
 
     # stress modes
     T_nom = 25  # Nominal temperature in Celsius
     T_cold = 0
-    T_hot = 35
+    T_hot = 30
     L_rated = 1.0  # Rated load in per unit (example value)
 
     #    train data
@@ -185,7 +190,8 @@ def add_engineered_features(train_df, test_df, region):
     # train_df['psi3'] = psi4_tr
     # train_df['psi4'] = psi5_tr
     # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(5)/5)
-    train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
+    # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
+    train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr], weights=np.ones(2)/2)
     # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(4)/4)
 
 
@@ -218,7 +224,8 @@ def add_engineered_features(train_df, test_df, region):
     # test_df['psi3'] = psi4_te
     # test_df['psi4'] = psi5_te
     # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te, psi5_te], weights=np.ones(5)/5,  sigma_list=sigma_train, mu_list=mu_train)
-    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train, mu_list=mu_train)
+    # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train, mu_list=mu_train)
+    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te], weights=np.ones(2)/2,  sigma_list=sigma_train, mu_list=mu_train)
     # test_df['Stress'], _, _ = composit_stress([psi1_te, psi3_te, psi4_te, psi5_te], weights=np.ones(4)/4,  sigma_list=sigma_train, mu_list=mu_train)
 
 
@@ -351,7 +358,8 @@ def add_importance_weights(train_df, test_df,
     train_df['w_importance'] /= m
     test_df['w_importance'] /= m
 
-    ess = (train_df['w_importance'].sum())**2 / (np.sum(train_df['w_importance']**2) + 1e-12)
+    # ess = (train_df['w_importance'].sum())**2 / (np.sum(train_df['w_importance']**2) + 1e-12)
+    ess = ((train_df['Data_weight'] * train_df['w_importance']).sum())**2 / (np.sum(train_df['Data_weight'] * (train_df['w_importance']**2)) + 1e-12)
 
 
     return train_df, test_df, ess
@@ -620,7 +628,7 @@ def predict_proba_binary(model, X) -> np.ndarray:
 
     # ---- pyGAM first (important!) ----
     if hasattr(model, "predict_mu"):
-        Xn = np.asarray(X)  # pygam is happiest with ndarray
+        Xn = X.values  # pygam is happiest with ndarray
         return np.asarray(model.predict_mu(Xn)).ravel()
 
     # ---- sklearn-like predict_proba ----
