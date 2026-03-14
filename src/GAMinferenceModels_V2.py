@@ -27,6 +27,9 @@ from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
 
+from sklearn import set_config
+# enable metadata routing globally
+set_config(enable_metadata_routing=True)
 
 from pygam import LogisticGAM, s
 
@@ -167,7 +170,7 @@ def add_engineered_features(train_df, test_df, region):
     temp_tr = train_df['Temperature'].values
     humid_tr = train_df['Relative_humidity'].values
     load_tr = train_df['Load_CDF'].values
-
+    w_tr = train_df['Data_weight'].values
 
     psi1_tr, psi2_tr = therm_load_stress(temp_tr, load_tr,  T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
     # psi1_tr = therm_load_stress(temp_tr, load_tr, T_nom=T_nom, L_rated=L_rated)
@@ -191,7 +194,7 @@ def add_engineered_features(train_df, test_df, region):
     # train_df['psi4'] = psi5_tr
     # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(5)/5)
     # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr, psi3_tr], weights=np.ones(3)/3)
-    train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr], weights=np.ones(2)/2)
+    train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi2_tr], weights_data=w_tr, weights_psi=np.ones(2)/2)
     # train_df['Stress'], sigma_train, mu_train = composit_stress([psi1_tr, psi3_tr, psi4_tr, psi5_tr], weights=np.ones(4)/4)
 
 
@@ -202,6 +205,7 @@ def add_engineered_features(train_df, test_df, region):
     temp_te = test_df['Temperature'].values
     humid_te = test_df['Relative_humidity'].values
     load_te = test_df['Load_CDF'].values
+    w_te = test_df['Data_weight'].values
 
     psi1_te, psi2_te = therm_load_stress(temp_te, load_te, T_cold=T_cold, T_hot=T_hot, L_rated=L_rated)
     # psi1_te = therm_load_stress(temp_te, load_te, T_nom=T_nom, L_rated=L_rated)
@@ -225,7 +229,8 @@ def add_engineered_features(train_df, test_df, region):
     # test_df['psi4'] = psi5_te
     # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te, psi4_te, psi5_te], weights=np.ones(5)/5,  sigma_list=sigma_train, mu_list=mu_train)
     # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te], weights=np.ones(3)/3,  sigma_list=sigma_train, mu_list=mu_train)
-    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te], weights=np.ones(2)/2,  sigma_list=sigma_train, mu_list=mu_train)
+    test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te], weights_data=w_te, weights_psi=np.ones(2)/2,  sigma_list=sigma_train, mu_list=mu_train)
+    # test_df['Stress'], _, _ = composit_stress([psi1_te, psi2_te, psi3_te],  weights_data=w_te, weights_psi=np.ones(3)/3,  sigma_list=sigma_train)
     # test_df['Stress'], _, _ = composit_stress([psi1_te, psi3_te, psi4_te, psi5_te], weights=np.ones(4)/4,  sigma_list=sigma_train, mu_list=mu_train)
 
 
@@ -263,11 +268,10 @@ def cooling_stress_full(temp, humidity, T_nom, B=0.4) -> float:
     stress = temp + B * humidity
     return stress
 
-
-def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = None, sigma_list: Iterable[float] = None, mu_list: Iterable[float] = None) -> np.array:
+def composit_stress(psi_list: Iterable[np.array], weights_data: np.array, weights_psi: Iterable[float] = None, sigma_list: Iterable[float] = None, mu_list: Iterable[float] = None) -> np.array:
     """Combine multiple stress metrics into a single composite stress metric."""
-    if weights is not None:
-        if len(psi_list) != len(weights):
+    if weights_psi is not None:
+        if len(psi_list) != len(weights_psi):
             raise ValueError("Length of psi_list must match length of weights.")
     
     if sigma_list is None:
@@ -289,7 +293,7 @@ def composit_stress(psi_list: Iterable[np.array], weights: Iterable[float] = Non
     # Scale each psi to have std 1
     psi_list = [psi / sigma for psi, sigma in zip(psi_list, sigma_list)]
 
-    comp = np.array([w * psi ** 2 for w, psi in zip(weights, psi_list)]).sum(axis=0) if weights is not None else np.sum(psi_list, axis=0)
+    comp = np.array([w * psi ** 2 for w, psi in zip(weights_psi, psi_list)]).sum(axis=0) if weights_psi is not None else np.sum(psi_list, axis=0)
     comp = np.sqrt(comp)
     return comp, sigma_list, mu_list
 
@@ -510,10 +514,15 @@ def train_region_transition_model(
                                             n_splines=5,# if name=='A_leave' else 5,
                                         )()
         elif type_model == 'LogisticRegression':
+            # m = make_sklearn_logistic_factory(
+            #                                 feature_cols= feature_cols,
+            #                                 scale_cols=['Temperature', 'psi1', 'psi2', 'psi3', 'psi4'],
+            #                                 passthrough_cols=['Load_CDF']
+            #                             )()
             m = make_sklearn_logistic_factory(
-                                            feature_cols= feature_cols,
-                                            scale_cols=['Temperature', 'psi1', 'psi2', 'psi3', 'psi4'],
-                                            passthrough_cols=['Load_CDF']
+                                            feature_cols=feature_cols,
+                                            scale_cols=zscore_cols,#['Temperature', 'psi1', 'psi2', 'psi3', 'psi4'],
+                                            passthrough_cols=[c for c in feature_cols if c not in zscore_cols],
                                         )()
 
         # m = base_model_factory()
@@ -536,7 +545,8 @@ def train_region_transition_model(
             #             print(f" is finite : {np.isfinite(X[col].to_numpy()).all()}")
             #     except Exception as e:
             #         print(e)
-            X, scaler = feat_scale_transform(X, zscore_cols)
+            X, scaler = fit_scale_transform(X, zscore_cols, w)
+            # X, scaler = feat_scale_transform(X, zscore_cols)
             # print("AFTER")
             # for col in X.columns:
             #     print(col)
@@ -552,7 +562,8 @@ def train_region_transition_model(
             scalers[name] = scaler
             models[name] = fit_binary_gam_gcv(m, X, y, sample_weight=w, lam_grid=lam_grid, verbose=verbose)
         else:
-            m.fit(X, y, clf__sample_weight=w)
+            m.fit(X, y, sample_weight=w)
+            # m.fit(X, y, clf__sample_weight=w)
             models[name] = m
         # fit_binary_model(m, X, y, sample_weight=w)
 
@@ -650,7 +661,7 @@ def predict_proba_binary(model, X) -> np.ndarray:
 
     raise TypeError("Model does not support probability prediction.")
 
-def feat_scale_transform(X: pd.DataFrame, zscore_cols: list[str]) -> Tuple[pd.DataFrame, StandardScaler]:
+def fit_scale_transform(X: pd.DataFrame, zscore_cols: list[str], weights: np.array) -> Tuple[pd.DataFrame, StandardScaler]:
     """
     Scales specified columns of X using StandardScaler.
     Returns scaled DataFrame and the scaler used.
@@ -660,7 +671,8 @@ def feat_scale_transform(X: pd.DataFrame, zscore_cols: list[str]) -> Tuple[pd.Da
         return X, scaler  # no scaling needed
     else:
         X_scaled = X.copy()
-        X_scaled[zscore_cols] = scaler.fit_transform(X[zscore_cols])
+        X_scaled[zscore_cols] = scaler.fit_transform(X[zscore_cols], sample_weight=weights)
+
         return X_scaled, scaler
 
 # -------------------------------
@@ -688,28 +700,59 @@ def make_sklearn_logistic_factory(
     scale_cols = [c for c in scale_cols if c in feature_cols]
     passthrough_cols = [c for c in passthrough_cols if c in feature_cols]
 
+    # def factory():
+    #     preprocess = ColumnTransformer(
+    #         transformers=[
+    #             ("num_scaled", Pipeline([
+    #                 ("imputer", SimpleImputer(strategy="median")),
+    #                 ("scaler", StandardScaler()),
+    #             ]), scale_cols),
+    #             ("passthrough", "passthrough", passthrough_cols),
+    #         ],
+    #         remainder="drop",
+    #         verbose_feature_names_out=False,
+    #     )
+    #     clf = Pipeline([
+    #         ("preprocess", preprocess),
+    #         ("clf", LogisticRegression(
+    #             penalty="l2",
+    #             C=C,
+    #             solver="lbfgs",
+    #             max_iter=max_iter,
+    #             class_weight=None,   # keep as you prefer
+    #         )),
+    #     ])
+    #     return clf
     def factory():
+        scaler = StandardScaler()
+        scaler.set_fit_request(sample_weight=True)
+
+        logreg = LogisticRegression(
+            penalty="l2",
+            C=C,
+            solver="lbfgs",
+            max_iter=max_iter,
+            class_weight=None,
+        )
+        logreg.set_fit_request(sample_weight=True)
+
         preprocess = ColumnTransformer(
             transformers=[
                 ("num_scaled", Pipeline([
                     ("imputer", SimpleImputer(strategy="median")),
-                    ("scaler", StandardScaler()),
+                    ("scaler", scaler),
                 ]), scale_cols),
                 ("passthrough", "passthrough", passthrough_cols),
             ],
             remainder="drop",
             verbose_feature_names_out=False,
         )
+
         clf = Pipeline([
             ("preprocess", preprocess),
-            ("clf", LogisticRegression(
-                penalty="l2",
-                C=C,
-                solver="lbfgs",
-                max_iter=max_iter,
-                class_weight=None,   # keep as you prefer
-            )),
+            ("clf", logreg),
         ])
+
         return clf
 
     return factory
